@@ -544,6 +544,26 @@ docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.0.0
 That must list `linux/amd64` **and** `linux/arm64`. If it does and you still get the
 warning, the problem is local caching every time.
 
+**`requested static ip 172.28.0.10 not in any subnet on network
+postquantumleap_default`.** The network already exists and was created by something else —
+almost always a failed earlier attempt, and `podman-compose` in particular creates it with
+podman's own default subnet and no ipam configuration. A network is only configured when
+it is *created*, so Compose cannot apply the `172.28.0.0/16` the compose file declares to
+one that is already there, and the proxy's fixed address then belongs to no subnet.
+
+Delete the network and let Compose make it properly. This destroys no data — volumes are
+separate:
+
+```bash
+docker compose down
+docker network rm postquantumleap_default     # podman network rm ... under Podman
+docker compose up -d
+```
+
+The fixed address is not decoration: `TRUSTED_PROXY_CIDRS` names it as a `/32`, and that is
+what stops anything else on the bridge from forging the client IP the login rate limiter
+keys on. Do not "fix" this by deleting the static address from the compose file.
+
 **Start over completely.** `docker compose down -v` destroys the volumes and therefore
 every bit of data, TLS material and the local CA. There is no undo.
 
