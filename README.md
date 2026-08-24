@@ -517,6 +517,30 @@ is the deliberate escape hatch for a trusted LAN and nowhere else.
 **Port 80 or 443 already in use.** Something else holds them — `sudo lsof -i :443`. Stop
 it, or [bring your own ingress](#11-bring-your-own-ingress).
 
+**`exec container process ... Exec format error`, repeating forever, and the app is missing
+from `docker compose ps`.** This is the *same* cause as the platform warning below, wearing
+a much worse disguise: the container holds an amd64 binary and the host is arm64, so it
+cannot execute at all and crash-loops. The app never appears as a running service; only the
+database and proxy do, which makes it look like the app image is broken rather than simply
+the wrong architecture.
+
+**`docker compose down -v` does not fix it.** That removes volumes, not images — so an
+image pulled before the multi-arch release survives every teardown and gets reused on every
+`up`. Delete the image itself:
+
+```bash
+docker compose down
+docker rmi -f ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.0.0
+docker compose pull
+docker compose up -d
+```
+
+Then check what you actually have, before looking at anything else:
+
+```bash
+docker image inspect ghcr.io/christianjucker/pql-app:latest --format '{{.Os}}/{{.Architecture}}'
+```
+
 **On arm64: "The requested image's platform (linux/amd64) does not match the detected host
 platform (linux/arm64/v8)".** The published image carries both architectures, so this means
 your machine still holds the image it pulled *before* the multi-arch release — `up` reuses
