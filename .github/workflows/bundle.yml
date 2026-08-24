@@ -1,0 +1,104 @@
+name: air-gapped bundle
+
+# Packages the PUBLISHED image as a loadable tarball and attaches it to a
+# release here, for sites that cannot pull from a registry.
+#
+# ── Why this runs in THIS repository and not in the product repository ──
+#
+# The product's publish script writes two files side by side into dist/:
+# pql-app-<v>.tar.gz, which is FOR CUSTOMERS, and pql-<v>-src.tar.gz, which is
+# the PROPRIETARY SOURCE and must never be published. The script says so in a
+# warning to its own operator, because that adjacency is exactly how the wrong
+# one gets attached to a release.
+#
+# Running the packaging here removes the possibility rather than guarding it:
+# this repository has no source in it, and this job builds the bundle from the
+# public image it pulls anonymously. There is no src archive on the runner to
+# attach by mistake. The check below is a second line, not the first.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published image version to package, e.g. 1.0.0 (no leading v)'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # create the release and upload the asset
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # No docker/login-action, deliberately. Pulling ANONYMOUSLY is what makes
+      # this job double as a standing check that the image customers are told to
+      # pull can actually be pulled by someone who is not us.
+      - name: Pull the published image
+        run: |
+          set -euo pipefail
+          image="ghcr.io/christianjucker/pql-app:${{ inputs.version }}"
+          if ! docker pull "$image"; then
+            echo "::error::anonymous pull of $image failed — either the version does not exist or the package is not public" >&2
+            exit 1
+          fi
+          docker image inspect "$image" --format 'pulled {{.Id}}'
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          docker save "ghcr.io/christianjucker/pql-app:$v" | gzip > "pql-app-${v}.tar.gz"
+          sha256sum "pql-app-${v}.tar.gz" > "pql-app-${v}.tar.gz.sha256"
+          ls -lh "pql-app-${v}.tar.gz"
+          cat "pql-app-${v}.tar.gz.sha256"
+
+      - name: Refuse to upload anything but the bundle
+        run: |
+          set -euo pipefail
+          # Belt and braces behind the structural guarantee above.
+          if ls ./*src*.tar.gz >/dev/null 2>&1; then
+            echo "::error::a source archive is present on the runner — refusing to publish" >&2
+            exit 1
+          fi
+          echo "no source archive present"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          tag="v${v}"
+
+          # Quoted heredoc: the release notes contain markdown code fences, and
+          # an unquoted one would run everything between the backticks as a
+          # command substitution instead of writing it out. The version is
+          # substituted afterwards rather than interpolated for the same reason.
+          cat > notes.md <<'NOTES'
+          Air-gapped bundle for `__VERSION__`.
+
+          ```bash
+          sha256sum -c pql-app-__VERSION__.tar.gz.sha256
+          docker load < pql-app-__VERSION__.tar.gz
+          ```
+
+          Then set `PQL_IMAGE=ghcr.io/christianjucker/pql-app:__VERSION__` in your `.env`.
+
+          Pre-stage `postgres:16` and `caddy:2.11.4` the same way — the stack needs
+          all three images and only one of them is in this bundle.
+          NOTES
+          sed -i "s/__VERSION__/${v}/g" notes.md
+          # The heredoc above is indented to stay inside this YAML block scalar;
+          # strip that indent back off before GitHub renders it as markdown.
+          sed -i 's/^          //' notes.md
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Post Quantum Leap $v" --notes-file notes.md
+          else
+            gh release edit "$tag" --notes-file notes.md
+          fi
+          gh release upload "$tag" \
+            "pql-app-${v}.tar.gz" "pql-app-${v}.tar.gz.sha256" --clobber

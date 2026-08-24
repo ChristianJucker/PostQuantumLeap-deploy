@@ -1,0 +1,85 @@
+{
+  "admin": {
+    "listen": ":2019",
+    "origins": [
+      "caddy:2019",
+      "localhost:2019",
+      "127.0.0.1:2019"
+    ]
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "pql": {
+          "listen": [
+            ":443"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "app:8000"
+                    }
+                  ],
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Forwarded-Proto": [
+                          "https"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "localhost",
+              "127.0.0.1",
+              "::1"
+            ],
+            "issuers": [
+              {
+                "module": "internal",
+                "lifetime": "720h"
+              }
+            ]
+          },
+          {
+            "issuers": [
+              {
+                "module": "internal",
+                "lifetime": "720h"
+              }
+            ],
+            "on_demand": true
+          }
+        ],
+        "on_demand": {
+          "permission": {
+            "module": "http",
+            "endpoint": "http://app:8000/api/tls/on-demand"
+          }
+        }
+      },
+      "certificates": {
+        "automate": [
+          "localhost",
+          "127.0.0.1",
+          "::1"
+        ]
+      }
+    }
+  }
+}

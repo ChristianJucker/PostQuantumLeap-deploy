@@ -1,0 +1,16 @@
+# Your configuration. It holds every credential this installation has —
+# database passwords, the session key, the settings encryption key.
+# You will create this from .env.example; never commit it.
+.env
+.env.*
+!.env.example
+
+# Engine image tarballs are fetched at setup time, not committed.
+deploy/engine-images/*
+!deploy/engine-images/.gitkeep
+
+# Bundles produced by the release workflow.
+*.tar.gz
+*.tar.gz.sha256
+
+.DS_Store

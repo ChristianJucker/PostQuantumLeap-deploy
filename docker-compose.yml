@@ -1,0 +1,244 @@
+# Compose project name — fixes the container prefix (postquantumleap-app-1,
+# postquantumleap-db-1) and the volume namespace regardless of the directory
+# the repo happens to live in.
+name: postquantumleap
+
+services:
+  db:
+    # ROAD-22: every image reference is overridable so an operator who mirrors
+    # internally can point the whole deployment at their own registry without
+    # editing this file. Separate variables rather than one prefix: Docker Hub
+    # images carry an implicit `library/` namespace that a naive prefix breaks.
+    image: ${PQL_POSTGRES_IMAGE:-postgres:16}
+    restart: unless-stopped
+    environment:
+      # Database role and name are pinned here rather than taken from .env:
+      # the brand rename must land deterministically, and an older .env that
+      # still pins the pre-rename values would otherwise silently win.
+      POSTGRES_USER: postquantumleap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postquantumleap
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Bind to loopback only — the database must not be reachable from other
+      # hosts on the network. Local tooling (psql, the e2e runner) still works
+      # via localhost. (SEC audit)
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postquantumleap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    # ROAD-21: customers PULL; they do not build. PQL_IMAGE lets an operator pin
+    # a version, or point at their own mirror (ROAD-22), without editing this
+    # file. Anonymous public pull — decision 30 — so no registry credential is
+    # needed and none should be added: the licence file is the commercial
+    # control, not the registry.
+    #
+    # Developers restore the local build with the overlay:
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+    image: ${PQL_IMAGE:-ghcr.io/christianjucker/pql-app:latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy   # waits for pg_isready to pass (Pitfall 4)
+    environment:
+      # Two DSNs since the database role split (tenancy STEP 1a, see
+      # docs/specs/2026-07-25-demo-mode-design.md §3.4). The application connects
+      # as the least-privilege runtime role pql_app (NOSUPERUSER NOBYPASSRLS, DML
+      # only, no schema DDL) so that Postgres row-security policies bind to it at
+      # all; migrations keep the owner identity, which is exempt from RLS by
+      # ownership — exactly what backfills need. entrypoint.sh creates/updates
+      # pql_app on every boot (python -m app.bootstrap_roles).
+      #
+      # Role and database NAMES are pinned here, not read from .env, for the same
+      # reason as on the db service above. Only passwords come from .env.
+      #
+      # APP_DB_PASSWORD defaults to POSTGRES_PASSWORD so `docker compose up` keeps
+      # working for an existing .env that has never heard of it — the fallback has
+      # to be non-empty, because Postgres refuses password auth for a role with an
+      # empty password and the app would never connect. A shared password adds no
+      # exposure here: this same container already holds the owner credential in
+      # MIGRATION_DATABASE_URL, so pql_app's password grants nobody anything new.
+      # It is only ever a fallback — set APP_DB_PASSWORD in .env to separate them,
+      # and bootstrap_roles rotates the role's password to match on the next boot.
+      DATABASE_URL: postgresql+asyncpg://pql_app:${APP_DB_PASSWORD:-${POSTGRES_PASSWORD}}@db:5432/postquantumleap
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://postquantumleap:${POSTGRES_PASSWORD}@db:5432/postquantumleap
+      APP_DB_USER: pql_app
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+      SESSION_SECRET_KEY: ${SESSION_SECRET_KEY}
+      # Must be an e-mail address — sign-in is by address since V2.4, and the
+      # seeder rewrites anything else to <value>@unset.invalid rather than
+      # failing the boot. The fallback IS that canonical "never set" spelling:
+      # a bare name would become exactly this anyway, so the default names the
+      # account it actually creates instead of hiding it behind a rewrite.
+      # It is an identifier, not a mailbox — nothing is ever mailed to it.
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-admin@unset.invalid}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
+      SETTINGS_ENC_KEY: ${SETTINGS_ENC_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      # Secure by default: the session cookie carries Secure and HSTS is sent.
+      # Set HTTPS_ONLY=false in .env ONLY to reach a local instance over plain
+      # HTTP from another device on the LAN (a phone or tablet). Browsers refuse
+      # to store a Secure cookie over http://, so without this the login form
+      # silently bounces back with no error. Never set it false where the
+      # instance is reachable from outside a trusted network.
+      #
+      # This is NOT needed for http://localhost:8000, the port published below.
+      # A loopback origin gets the cookie without Secure whatever this says —
+      # otherwise Safari, which unlike Chrome and Firefox honours the flag on
+      # localhost too, discards the session and cannot sign in at all. See
+      # backend/app/security/session_cookie.py.
+      HTTPS_ONLY: ${HTTPS_ONLY:-true}
+      # ⟳ THE SAME LEVER-NOT-REACHABLE BUG AS `ENGINE_VERSION` BELOW, found the
+      # same way and fixed here on 2026-08-24. `config.py` reads each of these
+      # from the environment and says so in its own comments ("override with
+      # SCAN_INTERVAL_HOURS env var"), and INSTALLATION.md §3 documents all of
+      # them as things an operator sets in `.env` — but compose listed none of
+      # them, and compose passes only the names it lists. So on the shipped
+      # stack every one of these was inert: setting it changed nothing, with no
+      # error to say why. The defaults below are `config.py`'s own, so this
+      # forwards the knobs without moving any of them.
+      SCAN_INTERVAL_HOURS: ${SCAN_INTERVAL_HOURS:-24}
+      SCAN_THROTTLING_MODE: ${SCAN_THROTTLING_MODE:-Normal}
+      SCAN_CONCURRENCY: ${SCAN_CONCURRENCY:-12}
+      TLS_VOLUME_DIR: ${TLS_VOLUME_DIR:-/var/lib/pql/tls}
+      # Off unless deliberately asked for: /docs and /openapi.json are
+      # unauthenticated by construction and publish the whole admin surface.
+      # Forwarded so it can be turned ON for a support session, not so it
+      # drifts on — the default here is the safe one either way.
+      EXPOSE_API_DOCS: ${EXPOSE_API_DOCS:-false}
+      # Remote engine (design §6.5). Passed through with the shipped defaults so
+      # an operator can raise the TTL from `.env` without editing this file —
+      # the number worth touching is the TTL, and only when engines routinely
+      # sit behind long change windows.
+      REMOTE_ENGINE_LEASE_SECONDS: ${REMOTE_ENGINE_LEASE_SECONDS:-300}
+      REMOTE_ENGINE_JOB_TTL_SECONDS: ${REMOTE_ENGINE_JOB_TTL_SECONDS:-3600}
+      REMOTE_ENGINE_WATCHDOG_SECONDS: ${REMOTE_ENGINE_WATCHDOG_SECONDS:-60}
+      # ── The instance's own TLS (spec 2026-08-06, D3/D6) ─────────────────
+      # Caddy terminates TLS in front; the app renders and pushes its config
+      # over the admin API, which lives only on the compose network — never
+      # published to the host.
+      PROXY_ADMIN_URL: ${PROXY_ADMIN_URL:-http://caddy:2019}
+      # The app parses X-Forwarded-For itself (entrypoint runs uvicorn with
+      # --no-proxy-headers, deliberately); these two tell it exactly one
+      # trusted hop stands in front, on the compose bridge. Without the CIDR
+      # the rate limiter degrades to one shared bucket (INSTALLATION.md §10).
+      TRUST_FORWARDED_FOR: "true"
+      TRUSTED_PROXY_HOPS: "1"
+      # The PROXY, not the range it sits in — see the `networks` block at the
+      # foot of this file for why a /12 here is a forgeable client IP.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.28.0.10/32}
+      # D6 first-boot seed (empty on-prem; the Azure script sets them): when
+      # present and no TLS configuration exists yet, the row is born in ACME
+      # mode and Caddy orders the certificate on its own.
+      TLS_SEED_ACME_DOMAIN: ${TLS_SEED_ACME_DOMAIN:-}
+      TLS_SEED_ACME_EMAIL: ${TLS_SEED_ACME_EMAIL:-}
+      TLS_SEED_ACME_STAGING: ${TLS_SEED_ACME_STAGING:-false}
+      # Where the boot seeder looks for engine image tarballs. The directory is
+      # bind-mounted below and is EMPTY in a fresh checkout — the seeder returns
+      # 0 and says nothing, which is why this is safe to ship. `scripts/
+      # build-engine-image.sh` writes there, so a locally built engine becomes
+      # the hosted image on the next `docker compose up` instead of having to be
+      # uploaded by hand. The tarballs are gitignored and do NOT enter the image
+      # build context — that is what 35e71b8 removed, and this does not undo it.
+      ENGINE_IMAGE_DIR: /opt/engine-images
+      # §6.6's fleet-wide rollback lever — and it has to be REACHABLE to be
+      # one: a bad engine build is un-advertised by setting one variable on the
+      # SERVER, effective at the next `hello`, with no engine involvement,
+      # which is the whole point when those engines sit in customers' DMZs and
+      # nobody has a shell on them. `app/version.py` read all three from the
+      # environment and this file forwarded none of them, so on the shipped
+      # stack the lever could not be pulled at all. Found by running the
+      # upgrade drill on 2026-08-07: `ENGINE_VERSION=1.2.0` in `.env` changed
+      # nothing, because compose passes only the names it lists.
+      #
+      # Empty is the normal state and means "the build this server shipped
+      # with" — `version.py` folds `""` back to its own constant, because an
+      # empty advertised version would tell every engine it is stale forever.
+      ENGINE_VERSION: ${ENGINE_VERSION:-}
+      ENGINE_IMAGE_REF: ${ENGINE_IMAGE_REF:-}
+      ENGINE_IMAGE_DIGEST: ${ENGINE_IMAGE_DIGEST:-}
+    volumes:
+      # rw here, ro in caddy: uploaded/CSR key material lives ONLY on this
+      # volume (D1) — back it up, or re-provision after losing it.
+      - tls_certs:/var/lib/pql/tls
+      # :z relabels for SELinux (Fedora/RHEL, where Podman users mostly are).
+      # Docker and non-SELinux hosts ignore it, so this is a no-op there —
+      # without it a rootless Podman container gets permission denied on a
+      # host path it can plainly see (ROAD-23).
+      - ./deploy/engine-images:/opt/engine-images:ro,z
+    ports:
+      # Loopback only: the LAN-facing ports are Caddy's 80/443 now. This stays
+      # for local tooling and the e2e harness, which drive the app directly.
+      - "127.0.0.1:8000:8000"
+
+  # TLS termination (spec 2026-08-06). Stock image, pinned: a Go ≥ 1.24 build
+  # serves hybrid PQC key exchange (X25519MLKEM768) with classical fallback —
+  # v2.11.4 verified 2026-08-06. Bump deliberately, never blindly: the
+  # integration test probes the negotiated group against this exact image.
+  #
+  # Bring-your-own-ingress opt-out: `docker compose up -d --scale caddy=0`
+  # keeps caddy down; publish 8000 yourself behind your own TLS termination
+  # and keep HTTPS_ONLY=true. Documented in INSTALLATION.md §9.
+  caddy:
+    image: ${PQL_CADDY_IMAGE:-caddy:2.11.4}
+    restart: unless-stopped
+    depends_on:
+      - app
+    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json", "--resume"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Caddy's own storage: ACME certificates, keys, and the local CA that
+      # serves the first-boot bootstrap. A key backup concern, like tls_certs.
+      - caddy_data:/data
+      - caddy_config:/config
+      - tls_certs:/var/lib/pql/tls:ro
+      - ./deploy/caddy/bootstrap.json:/etc/caddy/bootstrap.json:ro,z
+    networks:
+      default:
+        # The address `TRUSTED_PROXY_CIDRS` names. Static, because "the proxy"
+        # has to be a fact the app can check rather than a range it shares with
+        # anything else on the bridge — see the `networks` block below.
+        ipv4_address: 172.28.0.10
+
+networks:
+  # ⟳ DECLARED WITH A FIXED SUBNET so the proxy has an address worth trusting.
+  # Security review, 2026-08-24.
+  #
+  # `TRUSTED_PROXY_CIDRS` used to default to `172.16.0.0/12` — the whole Docker
+  # bridge space — while the app also published `127.0.0.1:8000`. Docker's port
+  # publishing rewrites the source address, so ANY caller that reaches host
+  # loopback (a non-root local user, an SSRF primitive, another container an
+  # operator attaches) is observed as the bridge gateway, which is inside that
+  # range. The speaker check then passes, and the caller writes the whole
+  # `X-Forwarded-For` chain — including the client IP the login rate limiter
+  # and lockout key on. `app/security/client_ip.py` names this exact
+  # configuration as the anti-pattern it is guarding against.
+  #
+  # A /12 was never the proxy; it was the range the proxy happened to sit in.
+  # Now the proxy has a static address and only that address is trusted.
+  #
+  # ⚠ UPGRADING AN EXISTING INSTALL NEEDS `docker compose up -d --force-recreate`
+  # ONCE. Compose recreates only containers whose own configuration changed, so
+  # a plain `up -d` rebuilds the proxy onto this network and leaves an unchanged
+  # `app` container stranded off it — which then cannot resolve `db` and
+  # crash-loops with `Name or service not known`, reading like a database fault.
+  # Measured. `--force-recreate` replaces containers, not volumes; the database
+  # is untouched.
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+  tls_certs:
+  caddy_data:
+  caddy_config:
