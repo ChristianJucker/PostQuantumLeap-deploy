@@ -517,6 +517,33 @@ is the deliberate escape hatch for a trusted LAN and nowhere else.
 **Port 80 or 443 already in use.** Something else holds them — `sudo lsof -i :443`. Stop
 it, or [bring your own ingress](#11-bring-your-own-ingress).
 
+**On arm64: "The requested image's platform (linux/amd64) does not match the detected host
+platform (linux/arm64/v8)".** The published image carries both architectures, so this means
+your machine still holds the image it pulled *before* the multi-arch release — `up` reuses
+a tag that already exists locally rather than re-resolving it against the registry.
+
+```bash
+docker compose down
+docker compose pull
+docker compose up -d
+```
+
+If it survives that, the tag is still mapped to the old digest. Drop it and pull again:
+
+```bash
+docker rmi ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.0.0
+docker compose pull
+```
+
+Confirm what the registry actually offers — this needs no credentials and no local state:
+
+```bash
+docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.0.0
+```
+
+That must list `linux/amd64` **and** `linux/arm64`. If it does and you still get the
+warning, the problem is local caching every time.
+
 **Start over completely.** `docker compose down -v` destroys the volumes and therefore
 every bit of data, TLS material and the local CA. There is no undo.
 
