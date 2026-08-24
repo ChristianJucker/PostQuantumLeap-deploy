@@ -339,15 +339,39 @@ podman compose up -d
 **Podman older than 4.7** — there is no `compose` subcommand at all, and
 `podman compose up -d` fails with `Error: unknown shorthand flag: 'd' in -d`, which reads
 like a bad flag and is really a missing command. Point real Compose at Podman's
-Docker-compatible socket instead:
+Docker-compatible socket instead.
+
+Compose v2 ships as a **single self-contained binary**. You do not need Docker installed —
+this is the whole point, and `docker compose` (with a space) is the wrong command here
+because that subcommand belongs to the Docker CLI you do not have. Use `docker-compose`,
+with a hyphen:
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" -o ~/.local/bin/docker-compose
+chmod +x ~/.local/bin/docker-compose
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`$(uname -m)` resolves to the right asset on both architectures — `aarch64` and `x86_64`
+are exactly what those releases are named.
+
+Then start the socket and point Compose at it:
 
 ```bash
 systemctl --user enable --now podman.socket
 export DOCKER_HOST="unix:///run/user/$(id -u)/podman.sock"
-docker compose up -d
+docker-compose up -d
 ```
 
-Check which you have with `podman --version` before anything else.
+Both `export` lines last only for that shell. Put them in `~/.bashrc` if you want
+`docker-compose` to keep finding Podman in new terminals.
+
+Check which Podman you have with `podman --version` before any of this.
+
+> **Everywhere else in this guide writes `docker compose`** — upgrading, backups,
+> troubleshooting, logs. On this route substitute **`docker-compose`** (hyphen) in every
+> one of them, and keep `DOCKER_HOST` exported. Nothing else changes.
 
 ### 9.1 `podman-compose` is not supported
 
