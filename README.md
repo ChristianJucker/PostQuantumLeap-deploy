@@ -551,13 +551,33 @@ podman's own default subnet and no ipam configuration. A network is only configu
 it is *created*, so Compose cannot apply the `172.28.0.0/16` the compose file declares to
 one that is already there, and the proxy's fixed address then belongs to no subnet.
 
-Delete the network and let Compose make it properly. This destroys no data — volumes are
-separate:
+Delete the network and let Compose make it properly:
 
 ```bash
 docker compose down
 docker network rm postquantumleap_default     # podman network rm ... under Podman
 docker compose up -d
+```
+
+**If that reports `has associated containers with it`,** something other than Compose is
+still attached. `podman-compose` names containers with **underscores**
+(`postquantumleap_db_1`) where real Compose uses **hyphens** (`postquantumleap-db-1`), so
+`down` removes its own and leaves the others holding the network. See what is there, then
+remove them:
+
+```bash
+podman ps -a --filter name=postquantumleap --format '{{.Names}}\t{{.Status}}'
+podman rm -f $(podman ps -aq --filter name=postquantumleap_)
+```
+
+**On a fresh install, wiping is cheaper than untangling** — and it avoids a trap. **Postgres
+reads `POSTGRES_PASSWORD` only when it initialises the data directory.** If a failed attempt
+created the volume and you have since regenerated `.env`, the database still holds the *old*
+password, the app cannot authenticate, and nothing in the error says so. `docker compose down
+-v` destroys the volumes and every bit of data in them, which on a first install is nothing:
+
+```bash
+docker compose down -v
 ```
 
 The fixed address is not decoration: `TRUSTED_PROXY_CIDRS` names it as a `/32`, and that is
