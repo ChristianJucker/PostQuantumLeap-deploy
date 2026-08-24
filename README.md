@@ -323,8 +323,40 @@ needs all three and only one of them is in the bundle.
 
 ## 9. Running under Podman
 
-The compose file is Podman-compatible and needs no edits. Podman 4.x+ provides
-`podman compose`; older installations use the separate `podman-compose`.
+**`podman compose` needs Podman 4.7 or newer.** It is a thin wrapper that delegates to a
+real compose implementation, and it does not exist before 4.7 — so on Debian 12 (Podman
+4.3.x), Ubuntu 22.04 and RHEL 9.2, `podman compose up -d` fails with:
+
+```
+Error: unknown shorthand flag: 'd' in -d
+```
+
+That reads like a bad flag and is not: Podman has no `compose` subcommand to hand `-d` to,
+so it parses the flag against itself. Check with `podman --version` before anything else.
+
+**On Podman 4.7+**, `podman compose up -d` works as written below.
+
+**On anything older, point real Compose at Podman's socket** rather than reaching for
+`podman-compose`:
+
+```bash
+systemctl --user enable --now podman.socket
+export DOCKER_HOST="unix:///run/user/$(id -u)/podman.sock"
+docker compose up -d
+```
+
+Podman serves a Docker-compatible API there, so Compose behaves exactly as it does on
+Docker. That matters for this file specifically: it uses `depends_on:` with
+`condition: service_healthy` and a **static IPv4 address** for the proxy, and
+`podman-compose` — a separate reimplementation, not a wrapper — has historically covered
+those unevenly. If it ignores the static address, Caddy comes up on a different IP than
+`TRUSTED_PROXY_CIDRS` names and the app quietly degrades to one shared rate-limit bucket,
+warning at startup rather than failing. `podman-compose up -d` may well work; the socket
+route is the one that behaves identically to what this guide describes.
+
+> **Not yet verified end to end by us.** Everything else in this guide has been executed as
+> written; the Podman path has not. If you run it, tell us what broke —
+> [info@postquantumleap.com](mailto:info@postquantumleap.com).
 
 **Rootless Podman cannot bind ports below 1024**, and Caddy publishes 80 and 443. Either
 run rootful (`sudo podman compose up -d`), or lower the threshold once on the host:
