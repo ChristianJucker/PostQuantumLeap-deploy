@@ -39,8 +39,11 @@ rebuild the host later.
 
 - **A licence** — see [above](#0-order-your-licence-first). Everything else on this list
   takes minutes to satisfy; the licence is the one that may not, so start it first
-- **Docker** with **Compose v2** (`docker compose version` ≥ 2.0), or **Podman** 4.x+
+- **Docker** with **Compose v2** (`docker compose version` ≥ 2.0), or **Podman** 4.7+
   — see [Running under Podman](#9-running-under-podman)
+- **`curl`** and **`git`** — used by the steps below to fetch these files and, on Podman,
+  the Compose binary. `sudo apt install curl git` on Debian/Ubuntu, `sudo dnf install
+  curl git` on Fedora/RHEL. A minimal server image often ships neither
 - **Ports 80 and 443** free on the host. Caddy takes both; port 80 exists for the
   ACME challenge
 - **Outbound network access** to the TLS endpoints you intend to scan
@@ -356,13 +359,28 @@ export PATH="$HOME/.local/bin:$PATH"
 `$(uname -m)` resolves to the right asset on both architectures — `aarch64` and `x86_64`
 are exactly what those releases are named.
 
-Then start the socket and point Compose at it:
+Then start the socket and point Compose at it. **Ask Podman where its socket is rather
+than assuming** — it lives in a `podman/` subdirectory of the runtime dir
+(`/run/user/1000/podman/podman.sock`), not directly in it, and hardcoding the shorter path
+fails with `dial unix /run/user/1000/podman.sock: connect: no such file or directory`
+*after* the socket has started perfectly well:
 
 ```bash
 systemctl --user enable --now podman.socket
-export DOCKER_HOST="unix:///run/user/$(id -u)/podman.sock"
+export DOCKER_HOST="unix://$(podman info --format '{{.Host.RemoteSocket.Path}}')"
 docker-compose up -d
 ```
+
+If that still cannot connect, check the socket is actually running and see the path it
+reports:
+
+```bash
+systemctl --user status podman.socket
+podman info --format '{{.Host.RemoteSocket.Path}} exists={{.Host.RemoteSocket.Exists}}'
+```
+
+`Exists=false` means the unit is enabled but not started — `systemctl --user start
+podman.socket`.
 
 Both `export` lines last only for that shell. Put them in `~/.bashrc` if you want
 `docker-compose` to keep finding Podman in new terminals.
