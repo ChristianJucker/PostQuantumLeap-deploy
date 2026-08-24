@@ -517,6 +517,39 @@ is the deliberate escape hatch for a trusted LAN and nowhere else.
 **Port 80 or 443 already in use.** Something else holds them — `sudo lsof -i :443`. Stop
 it, or [bring your own ingress](#11-bring-your-own-ingress).
 
+**`Illegal instruction` during `alembic upgrade head`, and the app crash-loops.** Seen on
+Debian 12 arm64 under Parallels with Podman 4.3.1; not seen on Ubuntu 24.04 arm64 or on
+macOS/Docker with the same image.
+
+The crash is inside `import cryptography.x509`, while the bundled OpenSSL in that wheel runs
+its aarch64 capability probe — which reads CPU ID registers through an instruction the
+kernel has to trap and emulate. Where it does not, the probe itself is the illegal
+instruction. Confirm in one command:
+
+```bash
+docker compose run --rm -e OPENSSL_armcap=0 --entrypoint python app -c "import cryptography.x509; print('OK')"
+```
+
+If that prints `OK`, make it permanent with a `docker-compose.override.yml` beside the
+compose file — Compose merges it automatically, and it affects nothing else:
+
+```yaml
+services:
+  app:
+    environment:
+      OPENSSL_armcap: "0"
+```
+
+**This costs performance and is not a default for that reason.** Setting it to `0` turns off
+OpenSSL's hardware AES and SHA acceleration, which a product that spends its time on TLS
+handshakes will feel. Use it where it is needed and nowhere else. A newer kernel — Ubuntu
+24.04 rather than Debian 12 — avoids the problem without the penalty.
+
+**Do not set `OPENSSL_armcap` empty to "unset" it.** OpenSSL reads it with `getenv` and
+parses any non-null value with `strtoul`, so an empty string means **0**, silently disabling
+the very acceleration you were trying to keep. Either define it as `"0"` or leave it out of
+the file entirely.
+
 **`exec container process ... Exec format error`, repeating forever, and the app is missing
 from `docker compose ps`.** This is the *same* cause as the platform warning below, wearing
 a much worse disguise: the container holds an amd64 binary and the host is arm64, so it
