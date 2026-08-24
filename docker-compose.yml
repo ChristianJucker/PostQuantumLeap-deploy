@@ -9,7 +9,16 @@ services:
     # internally can point the whole deployment at their own registry without
     # editing this file. Separate variables rather than one prefix: Docker Hub
     # images carry an implicit `library/` namespace that a naive prefix breaks.
-    image: ${PQL_POSTGRES_IMAGE:-postgres:16}
+    #
+    # ⟳ FULLY QUALIFIED since 2026-08-24, and it has to stay that way. Docker
+    # silently resolves a bare `postgres:16` against docker.io; PODMAN DOES NOT,
+    # and on a host with no `unqualified-search-registries` in
+    # /etc/containers/registries.conf it refuses outright:
+    #   Error: short-name "postgres:16" did not resolve to an alias and no
+    #   unqualified-search registries are defined
+    # Reported from Debian 12. Writing the registry out costs nothing on Docker
+    # and is the difference between working and not on Podman.
+    image: ${PQL_POSTGRES_IMAGE:-docker.io/library/postgres:16}
     restart: unless-stopped
     environment:
       # Database role and name are pinned here rather than taken from .env:
@@ -186,7 +195,7 @@ services:
   # keeps caddy down; publish 8000 yourself behind your own TLS termination
   # and keep HTTPS_ONLY=true. Documented in INSTALLATION.md §9.
   caddy:
-    image: ${PQL_CADDY_IMAGE:-caddy:2.11.4}
+    image: ${PQL_CADDY_IMAGE:-docker.io/library/caddy:2.11.4}
     restart: unless-stopped
     depends_on:
       - app

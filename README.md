@@ -44,6 +44,10 @@ rebuild the host later.
 - **Ports 80 and 443** free on the host. Caddy takes both; port 80 exists for the
   ACME challenge
 - **Outbound network access** to the TLS endpoints you intend to scan
+- An **x86-64 (amd64)** host. The published image is amd64 only — there is no arm64
+  build yet, so an Apple Silicon VM, a Raspberry Pi or an arm64 cloud instance needs
+  `qemu-user-static` and runs everything emulated, which is fine for a look at the
+  product and not fine for anything else
 - Roughly **4 GB RAM** and **10 GB disk** to start; the database grows with your
   inventory and scan history
 
@@ -323,21 +327,19 @@ needs all three and only one of them is in the bundle.
 
 ## 9. Running under Podman
 
-**`podman compose` needs Podman 4.7 or newer.** It is a thin wrapper that delegates to a
-real compose implementation, and it does not exist before 4.7 — so on Debian 12 (Podman
-4.3.x), Ubuntu 22.04 and RHEL 9.2, `podman compose up -d` fails with:
+Podman works, but **only through a real Compose implementation**. Take one of these two
+routes; the third thing you might reach for does not work, and §9.1 says why.
 
+**Podman 4.7 or newer** — `podman compose` is a thin wrapper that delegates to real Compose:
+
+```bash
+podman compose up -d
 ```
-Error: unknown shorthand flag: 'd' in -d
-```
 
-That reads like a bad flag and is not: Podman has no `compose` subcommand to hand `-d` to,
-so it parses the flag against itself. Check with `podman --version` before anything else.
-
-**On Podman 4.7+**, `podman compose up -d` works as written below.
-
-**On anything older, point real Compose at Podman's socket** rather than reaching for
-`podman-compose`:
+**Podman older than 4.7** — there is no `compose` subcommand at all, and
+`podman compose up -d` fails with `Error: unknown shorthand flag: 'd' in -d`, which reads
+like a bad flag and is really a missing command. Point real Compose at Podman's
+Docker-compatible socket instead:
 
 ```bash
 systemctl --user enable --now podman.socket
@@ -345,18 +347,27 @@ export DOCKER_HOST="unix:///run/user/$(id -u)/podman.sock"
 docker compose up -d
 ```
 
-Podman serves a Docker-compatible API there, so Compose behaves exactly as it does on
-Docker. That matters for this file specifically: it uses `depends_on:` with
-`condition: service_healthy` and a **static IPv4 address** for the proxy, and
-`podman-compose` — a separate reimplementation, not a wrapper — has historically covered
-those unevenly. If it ignores the static address, Caddy comes up on a different IP than
-`TRUSTED_PROXY_CIDRS` names and the app quietly degrades to one shared rate-limit bucket,
-warning at startup rather than failing. `podman-compose up -d` may well work; the socket
-route is the one that behaves identically to what this guide describes.
+Check which you have with `podman --version` before anything else.
 
-> **Not yet verified end to end by us.** Everything else in this guide has been executed as
-> written; the Podman path has not. If you run it, tell us what broke —
-> [info@postquantumleap.com](mailto:info@postquantumleap.com).
+### 9.1 `podman-compose` is not supported
+
+`podman-compose` is a separate reimplementation rather than a wrapper, and it cannot run
+this compose file. Measured on **podman-compose 1.0.3 with Podman 4.3.1 (Debian 12)**,
+two failures we cannot fix from our side:
+
+- **It does not expand `${VAR:-default}`.** `docker-compose.yml` builds the app's database
+  URL from `${APP_DB_PASSWORD:-${POSTGRES_PASSWORD}}`, and podman-compose passed the string
+  through *literally* — the container was handed `pql_app:${POSTGRES_PASSWORD}` as its
+  password. Simple `${VAR}` worked; the default-value and nested forms did not. Nothing
+  errors; the app just cannot authenticate to its own database.
+- **It crashes on the proxy's static address.** The compose file pins Caddy to a fixed
+  IPv4 address so that `TRUSTED_PROXY_CIDRS` can name it as a `/32`, and podman-compose
+  aborts with `KeyError: "default={'ipv4_address': '172.28.0.10'}"` before starting it.
+
+Both are limitations of that tool, not of Podman. Either route above avoids them, because
+both hand the file to the same Compose implementation Docker uses.
+
+### Rootless, and ports below 1024
 
 **Rootless Podman cannot bind ports below 1024**, and Caddy publishes 80 and 443. Either
 run rootful (`sudo podman compose up -d`), or lower the threshold once on the host:
@@ -368,8 +379,16 @@ sudo sysctl --system
 
 The second keeps the containers unprivileged, which is most of the reason to run Podman.
 
-**SELinux is already handled** — the host bind mounts carry `:z`, so Fedora and RHEL
-relabel automatically. Docker ignores the flag, so one file works on both.
+### Two things already handled
+
+**Image names are fully qualified.** Podman refuses a short name — `Error: short-name
+"postgres:16" did not resolve to an alias and no unqualified-search registries are
+defined` — where Docker silently assumes Docker Hub. The compose file writes
+`docker.io/library/...` out in full, so neither runtime has to guess and you do not need
+to edit `/etc/containers/registries.conf`.
+
+**SELinux is handled** — the host bind mounts carry `:z`, so Fedora and RHEL relabel
+automatically. Docker ignores the flag, so one file works on both.
 
 ⚠ **Known gap:** the remote-engine deployment commands generated in the browser still say
 `docker`. They work under Podman if you substitute the command name by hand.
