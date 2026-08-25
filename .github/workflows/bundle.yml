@@ -51,6 +51,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ inputs.version }}
+          # ⚠ EVERY `gh release` CALL PASSES --repo, because this job has no
+          # actions/checkout. Without a git directory `gh` cannot infer the
+          # repository and dies with "fatal: not a git repository" — which it
+          # reports as a git error, not a gh one, so it reads like a broken
+          # checkout rather than a missing flag. Measured on run 32816665603.
+          # Checking out a whole repository just to create a release would be
+          # the more expensive way to fix it.
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           tag="v${V}"
@@ -88,10 +96,10 @@ jobs:
           # that indent back off before GitHub renders it as markdown.
           sed -i 's/^          //' notes.md
 
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "Post Quantum Leap $V" --notes-file notes.md
+          if ! gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$REPO" --title "Post Quantum Leap $V" --notes-file notes.md
           else
-            gh release edit "$tag" --notes-file notes.md
+            gh release edit "$tag" --repo "$REPO" --notes-file notes.md
           fi
 
   bundle:
@@ -168,7 +176,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           V: ${{ inputs.version }}
           ARCH: ${{ matrix.arch }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           out="pql-app-${V}-${ARCH}.tar.gz"
-          gh release upload "v${V}" "$out" "${out}.sha256" --clobber
+          gh release upload "v${V}" --repo "$REPO" "$out" "${out}.sha256" --clobber
