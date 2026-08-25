@@ -47,10 +47,11 @@ rebuild the host later.
 - **Ports 80 and 443** free on the host. Caddy takes both; port 80 exists for the
   ACME challenge
 - **Outbound network access** to the TLS endpoints you intend to scan
-- An **x86-64 (amd64)** host. The published image is amd64 only — there is no arm64
-  build yet, so an Apple Silicon VM, a Raspberry Pi or an arm64 cloud instance needs
-  `qemu-user-static` and runs everything emulated, which is fine for a look at the
-  product and not fine for anything else
+- An **amd64 or arm64** host. The published image is a multi-architecture manifest
+  covering `linux/amd64` and `linux/arm64`, so `docker pull` fetches the right one and
+  an Apple Silicon VM, an arm64 cloud instance or a 64-bit Raspberry Pi runs natively —
+  no `qemu-user-static`, no emulation. Verify what you are about to run with
+  `docker manifest inspect ghcr.io/christianjucker/pql-app:latest`
 - Roughly **4 GB RAM** and **10 GB disk** to start; the database grows with your
   inventory and scan history
 
@@ -105,9 +106,14 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 No Python on the host? Borrow the one in the image:
 
 ```bash
-docker run --rm ghcr.io/christianjucker/pql-app:latest \
-  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+docker run --rm --entrypoint python ghcr.io/christianjucker/pql-app:latest \
+  -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+`--entrypoint python` is required and is easy to lose when retyping this. The image
+starts through `entrypoint.sh`, so without it `python` and everything after arrive as
+*arguments to the entrypoint* rather than as the command — the container tries to
+bootstrap a database, fails on the missing `DATABASE_URL`, and prints no key.
 
 Two settings deserve a decision now rather than later:
 
