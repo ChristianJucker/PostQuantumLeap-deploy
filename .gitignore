@@ -14,3 +14,8 @@ deploy/engine-images/*
 *.tar.gz.sha256
 
 .DS_Store
+
+# A local Compose override, if you create one — the arm64 OPENSSL_armcap
+# workaround in Troubleshooting tells you to. It describes YOUR host, so it is
+# yours to keep rather than something to carry back upstream.
+docker-compose.override.yml

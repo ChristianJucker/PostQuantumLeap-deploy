@@ -121,7 +121,7 @@ right for a trial and wrong for a maintained installation: an unattended pull th
 you across a release boundary at a moment you did not choose.
 
 ```bash
-PQL_IMAGE=ghcr.io/christianjucker/pql-app:3.0.0
+PQL_IMAGE=ghcr.io/christianjucker/pql-app:3.1.0
 ```
 
 The versions actually published are listed at
@@ -271,6 +271,14 @@ pull` on a pinned tag re-fetches the same image and changes nothing.
 
 > **Coming from a build older than 2.1?** 2.1 is the upgrade floor and such an instance is
 > reset once when 2.1 is deployed. Export anything you need first.
+
+> **Upgrading to 3.1.0 makes stored credentials one-way.** 3.1.0 changes how the SSO
+> client secret and proxy passwords are encrypted at rest: existing values keep working
+> unchanged, but any credential you **re-save** after upgrading is written in the new
+> format, which 3.0.0 cannot read. So a rollback to 3.0.0 is safe *until* you re-enter a
+> secret — after that, rolling back leaves that one credential unreadable and it has to be
+> entered again. Nothing else about the upgrade is one-way, and you do not need to
+> re-enter anything to upgrade.
 
 > **Upgrading an install created before 2026-08-24 needs `docker compose up -d
 > --force-recreate` once.** The proxy moved to a fixed network address. Compose recreates
@@ -443,7 +451,7 @@ Mirror internally and point the whole deployment at your registry — no file ed
 variables:
 
 ```bash
-PQL_IMAGE=registry.example.com/pql-app:3.0.0
+PQL_IMAGE=registry.example.com/pql-app:3.1.0
 PQL_POSTGRES_IMAGE=registry.example.com/postgres:16
 PQL_CADDY_IMAGE=registry.example.com/caddy:2.11.4
 ```
@@ -563,7 +571,7 @@ image pulled before the multi-arch release survives every teardown and gets reus
 
 ```bash
 docker compose down
-docker rmi -f ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.0.0
+docker rmi -f ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.1.0
 docker compose pull
 docker compose up -d
 ```
@@ -588,14 +596,14 @@ docker compose up -d
 If it survives that, the tag is still mapped to the old digest. Drop it and pull again:
 
 ```bash
-docker rmi ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.0.0
+docker rmi ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.1.0
 docker compose pull
 ```
 
 Confirm what the registry actually offers — this needs no credentials and no local state:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.0.0
+docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.1.0
 ```
 
 That must list `linux/amd64` **and** `linux/arm64`. If it does and you still get the
