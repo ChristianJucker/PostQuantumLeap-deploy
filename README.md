@@ -77,9 +77,52 @@ What you now have:
 | `.env.example` | template for your configuration |
 | `deploy/caddy/bootstrap.json` | the proxy's starting configuration, mounted read-only |
 | `deploy/engine-images/` | empty, and correct that way — see [Remote engines](#12-remote-engines) |
+| `deploy/install-windows.ps1` | Windows only — does sections 1 to 3 for you, see below |
 
 Keep the directory layout. `docker-compose.yml` mounts the last two by relative path,
 so moving them breaks the start.
+
+### On Windows
+
+Windows is a supported platform, and there is a script that does sections 1 to 3 for
+you — prerequisite checks, the compose file, real generated secrets in `.env`, and
+starting the stack.
+
+⚠ **Pass `-InstallDir`.** You will usually be running from an elevated PowerShell,
+because that is where the container runtime is reachable — and **elevation resets the
+working directory to `C:\Windows\System32`**. The default install path is relative to
+wherever you are, so it silently becomes `C:\Windows\System32\postquantumleap`, and
+nobody notices until they go looking for their `.env`:
+
+```powershell
+.\deploy\install-windows.ps1 -InstallDir C:\ProgramData\PostQuantumLeap
+```
+
+It picks up whichever runtime you have. To force one:
+
+```powershell
+.\deploy\install-windows.ps1 -Runtime podman -InstallDir C:\pql
+```
+
+The script warns you if it detects that path, and it locks the install directory to
+SYSTEM, Administrators and you before writing anything — `.env` holds every secret this
+stack has, and the directories you would land in by accident grant read access to all
+local users by inheritance. If it cannot apply or verify that lock, **it aborts instead
+of writing the file.**
+
+**It writes the same `.env` and runs the same `docker-compose.yml` a Linux operator
+uses** — one supported deployment shape, not a Windows-shaped variant that drifts away
+from it. So everything from section 4 onward applies to you unchanged, and so does
+every troubleshooting entry below.
+
+You still need a container runtime first; the script checks and tells you if one is
+missing. **Podman Desktop is free for commercial use**, which is the usual reason to
+prefer it — Docker Desktop requires a paid subscription above a company-size threshold.
+
+> **If you already have a `.env`, the script keeps it and does not regenerate secrets.**
+> That is deliberate: regenerating `SESSION_SECRET_KEY` signs every user out, and
+> regenerating `SETTINGS_ENC_KEY` orphans every stored SSO secret — they cannot be
+> decrypted afterwards. Delete the file deliberately if that is genuinely what you want.
 
 ---
 
