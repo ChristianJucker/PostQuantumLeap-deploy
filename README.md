@@ -321,18 +321,37 @@ everybody.
 
 ## 8. Air-gapped installs
 
-Download `pql-app-<version>.tar.gz` from this repository's
-[Releases](https://github.com/ChristianJucker/PostQuantumLeap-deploy/releases), carry it
+**There is one bundle per architecture, and you need the one that matches the machine you
+will run it on.** `docker save` writes a single platform per file — there is no "both"
+download. Check first, on the target machine:
+
+```bash
+uname -m
+```
+
+`x86_64` means **amd64**; `aarch64` or `arm64` means **arm64**.
+
+Download the matching pair from this repository's
+[Releases](https://github.com/ChristianJucker/PostQuantumLeap-deploy/releases), carry them
 across, then:
 
 ```bash
-sha256sum -c pql-app-<version>.tar.gz.sha256    # verify before loading
-docker load < pql-app-<version>.tar.gz
+sha256sum -c pql-app-<version>-amd64.tar.gz.sha256    # verify before loading
+docker load < pql-app-<version>-amd64.tar.gz
 ```
 
 Set `PQL_IMAGE` in `.env` to the exact tag the bundle carries (`docker images` after the
 load shows it), and pre-stage `postgres:16` and `caddy:2.11.4` the same way — the stack
 needs all three and only one of them is in the bundle.
+
+> **Loading the wrong architecture is not silent, but it is disguised.** The container
+> starts and dies immediately with `exec container process … exec format error`, repeating
+> forever, and the app never appears in `docker compose ps` — only the database and the
+> proxy do. That reads like a broken image rather than the wrong one. `docker rmi` the tag
+> and load the other file.
+
+> **Releases before `3.1.0` carry a single `pql-app-<version>.tar.gz` with no architecture
+> in the name.** Those are **amd64**, because that is what the runner that built them was.
 
 ---
 
