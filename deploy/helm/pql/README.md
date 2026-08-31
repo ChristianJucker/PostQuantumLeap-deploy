@@ -216,11 +216,12 @@ docker save <image> | docker exec --privileged -i pql-control-plane ctr --namesp
   exits rather than failing obscurely. The probes need nothing: they are
   `tcpSocket`, which is exact here because `entrypoint.sh` opens the port only
   after `alembic upgrade head` returns.
-- **Bundled remote-engine images are not supported.** The tarballs are ~61 MB per
-  architecture, far past the 1 MB ConfigMap limit, so they need an init container
-  pulling an OCI artifact. Omitting them is safe rather than broken — the seeder
-  returns 0 when the directory is absent. Upload an engine image through the
-  console instead.
+- **Hosted remote-engine images are supported** (`engineImages.source`), by an
+  init container staging them out of a data image, or by a PVC you populate.
+  Both were verified end to end: the archive reaches the pod and PQL writes the
+  `remote_engine_images` row. Off by default, and off is right for anyone who can
+  reach the console — `ensure_seeded_images` returns 0 when the directory is
+  absent, so leaving it alone breaks nothing.
 - **No CI.** Nothing renders or installs this chart automatically yet.
 - **Single-node testing only.** Nothing here proves ReadWriteOnce behaviour
   across nodes; the sidecar exists partly so that question never arises.

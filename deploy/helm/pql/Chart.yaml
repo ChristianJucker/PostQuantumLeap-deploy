@@ -5,7 +5,7 @@ type: application
 
 # The chart version tracks the application version it defaults to, so a customer
 # can say which build they are running from `helm list` alone. Bump both.
-version: 0.2.0
+version: 0.3.0
 appVersion: "3.2.0"
 
 home: https://postquantumleap.com

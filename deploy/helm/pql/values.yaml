@@ -194,6 +194,53 @@ config:
   engineImageRef: ""
   engineImageDigest: ""
 
+# ── Hosted remote-engine images (ROAD-38) ───────────────────────────────────
+#
+# An engine is deployed in a DMZ or an isolated OT segment — a host chosen
+# precisely because it has no route to a registry — so PQL can serve the engine's
+# `docker save` archive for an operator to `docker load` there.
+#
+# Compose does this with a bind mount. Kubernetes has none, so the tarballs
+# arrive one of two ways. Both are OFF by default, and off is correct for almost
+# everyone: an operator can upload the same archive through the platform console
+# whenever they need it, and `ensure_seeded_images` returns 0 when the directory
+# is absent, so nothing is broken by leaving this alone.
+#
+# It is for sites that mirror into their own registry and cannot reach the
+# console from where the engine lives.
+engineImages:
+  # `none`          — no hosted images from the chart. Use the console.
+  # `image`         — an init container copies tarballs out of an OCI image.
+  #                   Build one with scripts/build-engine-images-image.sh.
+  # `existingClaim` — mount a PVC you populated yourself, read-only.
+  source: none
+
+  image:
+    # ⚠ NO DEFAULT REGISTRY, deliberately. There is no published
+    # `pql-engine-images` to point at: these archives are built from the engine
+    # you intend to serve, by you or by us, and a plausible-looking default
+    # would turn a typo'd opt-in into ImagePullBackOff at boot instead of an
+    # error at render time. Build one with
+    # scripts/build-engine-images-image.sh and name it here.
+    repository: ""
+    # ⚠ AN ENGINE VERSION, and it must match the build this server advertises
+    # (`ENGINE_VERSION` in the application). Serving an archive PQL then calls
+    # stale is the failure the remote-engine chart already shipped once. Pinned
+    # by `test_helm_chart_env_contract.py`.
+    tag: "1.3.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+    # Where the tarballs sit inside that image.
+    path: /engine-images
+    # ⚠ The copy lands in an emptyDir on the NODE'S ephemeral storage, and each
+    # architecture is ~120 MB gzipped. A node under disk pressure evicts Pods
+    # whose ephemeral usage exceeds this, so it is a real limit rather than
+    # bookkeeping.
+    sizeLimit: 1Gi
+
+  # For `source: existingClaim`. Mounted read-only: the seeder only ever reads.
+  existingClaim: ""
+
 # TLS seeding for `sidecar` mode. With a domain set and no TLS configuration in
 # the database yet, the instance is born in ACME mode and Caddy orders its own
 # certificate. Ignored in `external` mode.

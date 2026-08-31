@@ -115,6 +115,17 @@ Keeping every name in one template is what lets a test enumerate them. See
   value: {{ .Values.config.engineImageRef | quote }}
 - name: ENGINE_IMAGE_DIGEST
   value: {{ .Values.config.engineImageDigest | quote }}
+{{- if ne .Values.engineImages.source "none" }}
+{{/*
+  Where the boot seeder looks for engine tarballs (ROAD-38). Only set when
+  something actually mounts that path: `ensure_seeded_images` returns 0 for a
+  missing directory, so pointing at nothing is harmless — but naming a directory
+  that is never mounted is the kind of configuration that reads as a feature
+  being on when it is not.
+*/}}
+- name: ENGINE_IMAGE_DIR
+  value: /opt/engine-images
+{{- end }}
 
 # ── the instance's own TLS ──────────────────────────────────────────────────
 - name: TLS_VOLUME_DIR

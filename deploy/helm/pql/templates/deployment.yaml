@@ -77,6 +77,42 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
+        {{- if eq .Values.engineImages.source "image" }}
+        {{/*
+          ROAD-38. Copies the engine `docker save` archives out of a data image
+          into an emptyDir the app then seeds from at boot.
+
+          ⚠ An init container rather than a plain volume because Kubernetes
+          cannot mount an image as one. The alternatives each fail differently:
+          a ConfigMap caps at ~1 MB against a ~120 MB payload per architecture,
+          and an OCI artifact needs `oras` in a registry that air-gapped sites —
+          the population this is for — have never been asked to serve.
+
+          `cp -a`, and `-a` is load-bearing: the seeder reads the file NAME to
+          decide the architecture, so anything that renames or flattens these
+          breaks the seeding silently rather than loudly.
+        */}}
+        - name: stage-engine-images
+          image: {{ include "pql.engineImagesImage" . }}
+          imagePullPolicy: {{ .Values.engineImages.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              if [ ! -d "{{ .Values.engineImages.image.path }}" ]; then
+                echo "no {{ .Values.engineImages.image.path }} in this image — is it an engine-images image?" >&2
+                exit 1
+              fi
+              cp -a {{ .Values.engineImages.image.path }}/. /staging/
+              echo "staged:"; ls -la /staging/
+          volumeMounts:
+            - name: engine-images
+              mountPath: /staging
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+        {{- end }}
       containers:
         - name: app
           image: {{ include "pql.image" . }}
@@ -88,6 +124,13 @@ spec:
           volumeMounts:
             - name: tls
               mountPath: /var/lib/pql/tls
+            {{- if ne .Values.engineImages.source "none" }}
+            {{/* Read-only: the seeder only ever reads, and a writable mount
+                 would let a compromised app rewrite what operators download. */}}
+            - name: engine-images
+              mountPath: /opt/engine-images
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -162,6 +205,16 @@ spec:
         - name: tls
           persistentVolumeClaim:
             claimName: {{ include "pql.fullname" . }}-tls
+        {{- if eq .Values.engineImages.source "image" }}
+        - name: engine-images
+          emptyDir:
+            sizeLimit: {{ .Values.engineImages.image.sizeLimit }}
+        {{- else if eq .Values.engineImages.source "existingClaim" }}
+        - name: engine-images
+          persistentVolumeClaim:
+            claimName: {{ .Values.engineImages.existingClaim }}
+            readOnly: true
+        {{- end }}
         {{- if eq .Values.ingress.mode "sidecar" }}
         - name: caddy-data
           persistentVolumeClaim:

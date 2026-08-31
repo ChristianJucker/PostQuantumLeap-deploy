@@ -148,8 +148,9 @@ connection pooling. It exists so a fresh cluster comes up with no other
 prerequisite. Point `externalDatabase.host` at a real database before the data
 matters.
 
-**Bundled remote-engine images are not available on Kubernetes.** Upload an
-engine image through the platform console instead.
+**Hosted remote-engine images need one extra step**, and only if you want them —
+see below. Most installations upload an engine archive through the platform
+console and need nothing here.
 
 ## Scanning a segment PQL cannot reach
 
@@ -173,6 +174,35 @@ resolve, connect, TLS, token. Behind a private CA, pass the bundle with
 Engines do not update themselves by default: PQL reports that a newer build
 exists and you redeploy when ready. See that chart's README before changing
 `autoUpdate`.
+
+### Serving the engine archive from an air-gapped segment
+
+An engine is often deployed on a host chosen precisely because it has no route
+to a registry, so PQL can serve the engine's `docker save` archive for you to
+`docker load` there. Upload one through the platform console and you are done.
+
+If the segment cannot reach the console either — you mirror everything into your
+own registry — the chart can carry the archives instead:
+
+```bash
+helm upgrade pql ./deploy/helm/pql -n pql --reuse-values \
+  --set engineImages.source=image \
+  --set engineImages.image.repository=registry.example.com/pql-engine-images \
+  --set engineImages.image.tag=1.3.0
+```
+
+An init container copies the archives out of that image at startup and PQL seeds
+them into its database. The tag is an **engine** version and must match the build
+your PQL advertises, or it will serve an archive it then reports as stale.
+
+Already have the archives on a volume? Point at it instead and skip the image:
+
+```bash
+--set engineImages.source=existingClaim --set engineImages.existingClaim=<pvc>
+```
+
+Either way this is optional. Left alone, nothing is broken — PQL simply has no
+hosted archive until someone uploads one.
 
 ## Upgrading
 

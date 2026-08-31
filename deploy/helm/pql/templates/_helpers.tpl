@@ -73,6 +73,28 @@ Deployment — see templates/deployment.yaml.
 
 
 {{/*
+The engine-images data image.
+
+⚠ ITS TAG IS AN ENGINE VERSION, NOT AN APPLICATION ONE, and it is NOT hardcoded
+here. A literal in a template is a second copy of a number that lives in
+`backend/app/version.py`, and the remote-engine chart already shipped that exact
+bug once — `appVersion: 1.1.0` against a server advertising 1.3.0, every engine
+stale from its first heartbeat. The value lives in values.yaml, where a test
+pins it to ENGINE_VERSION.
+*/}}
+{{- define "pql.engineImagesImage" -}}
+{{- $tag := .Values.engineImages.image.tag -}}
+{{- if and (not $tag) (not .Values.engineImages.image.digest) -}}
+{{- fail "engineImages.image.tag is empty and no digest is set — the chart will not guess which engine build to serve" -}}
+{{- end -}}
+{{- if .Values.engineImages.image.digest -}}
+{{ .Values.engineImages.image.repository }}@{{ .Values.engineImages.image.digest }}
+{{- else -}}
+{{ .Values.engineImages.image.repository }}:{{ $tag }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 ──────────────────────────────────────────────────────────────────────────────
 VALIDATION. Included once from deployment.yaml so it runs on every render,
 including `helm template` and `helm lint`.
@@ -124,6 +146,17 @@ including `helm template` and `helm lint`.
   {{- fail "\n\nservice.exposeAppPort is on in 'external' mode.\n\nThat publishes the app's own port 8000 alongside your ingress, so anything that\ncan reach the Service bypasses the proxy entirely — and a request that did not\ncome through the proxy carries no trustworthy forwarded chain. The app will log\n\"the app port is reachable off-proxy or the CIDR set is wrong\" and it will be\nright.\n\nLeave it off unless you are wiring an e2e harness, and never in this mode.\n" -}}
   {{- end -}}
 
+{{- end -}}
+
+{{/* ── hosted engine images ────────────────────────────────────────────── */}}
+{{- if not (has .Values.engineImages.source (list "none" "image" "existingClaim")) -}}
+{{- fail (printf "engineImages.source must be none, image or existingClaim, got %q" .Values.engineImages.source) -}}
+{{- end -}}
+{{- if and (eq .Values.engineImages.source "existingClaim") (not .Values.engineImages.existingClaim) -}}
+{{- fail "\n\nengineImages.source is 'existingClaim' but engineImages.existingClaim is empty.\n\nName the PersistentVolumeClaim holding your engine tarballs, or use\n`source: image` to have an init container stage them from an OCI image.\n" -}}
+{{- end -}}
+{{- if and (eq .Values.engineImages.source "image") (not .Values.engineImages.image.repository) -}}
+{{- fail "\n\nengineImages.source is 'image' but engineImages.image.repository is empty.\n\nBuild one from your staged tarballs:\n  ./scripts/build-engine-images-image.sh --push\n" -}}
 {{- end -}}
 
 {{/* ── database ───────────────────────────────────────────────────────── */}}
