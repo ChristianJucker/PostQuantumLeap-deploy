@@ -1,0 +1,20 @@
+apiVersion: v2
+name: pql
+description: Post Quantum Leap — cryptographic inventory and PQC readiness
+type: application
+
+# The chart version tracks the application version it defaults to, so a customer
+# can say which build they are running from `helm list` alone. Bump both.
+version: 0.1.0
+appVersion: "3.1.0"
+
+home: https://postquantumleap.com
+sources:
+  - https://github.com/PostQuantumLeap/PostQuantumLeap-deploy
+maintainers:
+  - name: Post Quantum Leap
+
+annotations:
+  # There is no HA story and the chart should not imply one — see values.yaml.
+  # One replica, Recreate, ReadWriteOnce.
+  "pql.io/replicas": "1"

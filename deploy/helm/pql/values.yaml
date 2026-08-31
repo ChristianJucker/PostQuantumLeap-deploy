@@ -1,0 +1,235 @@
+# Post Quantum Leap — Helm values.
+#
+# The chart is deliberately small. It owns the workload, the environment
+# contract and the *validation* of your proxy trust configuration; it does not
+# own your ingress controller, your storage class, your certificates or your
+# database. Anything it cannot verify, it refuses to guess at — see
+# `ingress.trustedProxyCIDRs` below, which the chart will not default for you.
+
+image:
+  repository: ghcr.io/christianjucker/pql-app
+  # Empty means "the chart's appVersion". Pin a digest in production.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+#
+# ⚠ THE CHART DOES NOT GENERATE SECRETS, AND THAT IS DELIBERATE.
+#
+# `SETTINGS_ENC_KEY` is the Fernet key protecting stored SSO client secrets. The
+# usual Helm idiom for "generate once, keep forever" is `randAlphaNum` guarded by
+# a `lookup` of the existing Secret — and `lookup` RETURNS EMPTY UNDER
+# `helm template`, which is exactly how ArgoCD and Flux render charts. So the
+# guard silently fails on the deployment method serious customers use, the key
+# regenerates, and every stored secret becomes undecryptable. A convenience that
+# quietly destroys data is not worth shipping.
+#
+# Create the Secret yourself, or sync it from a vault with `external-secrets` or
+# the Secrets Store CSI driver — see docs/deploy/secret-injection.md.
+#
+# Required keys: POSTGRES_PASSWORD, APP_DB_PASSWORD, SESSION_SECRET_KEY,
+# SETTINGS_ENC_KEY, INITIAL_ADMIN_USERNAME, INITIAL_ADMIN_PASSWORD.
+existingSecret: ""
+
+eval:
+  # LOCAL EVALUATION ONLY. Generates the Secret in-cluster, preserving existing
+  # values via `lookup` — which, per the note above, does not work under
+  # `helm template`. The chart refuses to install with this on unless
+  # `acknowledgeEphemeral` is also set, because the failure mode is data loss
+  # rather than an error.
+  generateSecrets: false
+  acknowledgeEphemeral: false
+  initialAdminUsername: admin@pql.local
+
+# ── Ingress ─────────────────────────────────────────────────────────────────
+ingress:
+  # `sidecar`  — the bundled Caddy runs in the app Pod and terminates TLS.
+  #              TRUSTED_PROXY_CIDRS is 127.0.0.1/32, correct by construction,
+  #              and there is nothing for you to get wrong.
+  # `external` — you terminate TLS at your own ingress controller. The chart
+  #              renders a plain Service (and optionally an Ingress), and you
+  #              MUST tell it which addresses your controller speaks from.
+  mode: sidecar
+
+  # ── `external` mode only ─────────────────────────────────────────────────
+  #
+  # ⚠ NO DEFAULT, ON PURPOSE. This is your ingress controller's own pod CIDR,
+  # and only you know it. It is a security control, not a connectivity setting,
+  # and it fails silently in both directions:
+  #
+  #   too narrow → the login rate limiter and account lockout degrade to ONE
+  #                shared bucket for every client behind the proxy;
+  #   too broad  → any workload that can reach the app port can forge
+  #                X-Forwarded-For and choose which bucket it lands in. This is
+  #                the exact hole that `docker-compose.yml`'s fixed subnet was
+  #                introduced to close on 2026-08-24.
+  #
+  # The chart refuses prefixes shorter than /16 and refuses 0.0.0.0/0 outright.
+  # After installing, run `helm test` — it asserts the wiring end to end rather
+  # than trusting this value.
+  #
+  # Find it with:
+  #   kubectl -n ingress-nginx get pods -o jsonpath='{.items[*].status.podIP}'
+  trustedProxyCIDRs: []
+  # Number of proxies between the client and PQL, counted from the right of
+  # X-Forwarded-For. One ingress controller = 1. A CDN in front of it = 2.
+  trustedProxyHops: 1
+
+  # Where `helm test` should dial to reach PQL THROUGH your ingress.
+  #
+  # Leave empty and the preflight uses `ingress.host`, which only works where
+  # the cluster's own resolver knows that name. With a split-horizon zone, a
+  # private name, or an external-DNS record the cluster has never seen, it
+  # fails with "Name or service not known" and tells you nothing about your
+  # trust configuration.
+  #
+  # Set it to your ingress controller's in-cluster Service and the preflight
+  # dials that, carrying `ingress.host` in the Host header — so nginx matches
+  # the same rule a real request would and the controller stays in the path.
+  #
+  #   preflightAddress: ingress-nginx-controller.ingress-nginx.svc.cluster.local
+  preflightAddress: ""
+
+  # Render an Ingress resource. Leave false if you manage ingress separately
+  # (a Gateway API HTTPRoute, an out-of-band controller, a service mesh).
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls:
+    enabled: true
+    secretName: ""
+
+service:
+  # ClusterIP is right for `external` mode. `sidecar` mode with no ingress
+  # controller usually wants LoadBalancer.
+  type: ClusterIP
+  # Publishing the app's own 8000 alongside 443 makes the app reachable
+  # OFF-PROXY, and the app says so in its log ("the app port is reachable
+  # off-proxy or the CIDR set is wrong"). Off by default; turn it on only for an
+  # e2e harness, and never in `external` mode where it bypasses your ingress.
+  exposeAppPort: false
+
+# ── Database ────────────────────────────────────────────────────────────────
+#
+# External by default: production PQL should point at a managed Postgres your
+# DBA owns and backs up. The bundled StatefulSet exists so an evaluation cluster
+# comes up with no other prerequisite, and it is not a supported production
+# database — it has no backup, no failover and no connection pooling.
+postgresql:
+  enabled: false
+  image: docker.io/library/postgres:16
+  storage:
+    size: 10Gi
+    className: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+externalDatabase:
+  host: ""
+  port: 5432
+  # Pinned names, matching compose: the application connects as the
+  # least-privilege runtime role so row-security policies bind to it, while
+  # migrations keep the owner identity, which is exempt from RLS by ownership.
+  database: postquantumleap
+  ownerUser: postquantumleap
+  appUser: pql_app
+  # `require` is the floor. Use `verify-full` with a CA bundle mounted via
+  # `extraVolumes` where your provider supports it — note that asyncpg does NOT
+  # fall back to the system trust store.
+  sslMode: require
+
+# ── Workload ────────────────────────────────────────────────────────────────
+#
+# ⚠ REPLICAS IS NOT A KNOB. One replica, Recreate, for three independent
+# reasons, any one of which is sufficient:
+#   - APScheduler runs IN-PROCESS (app/main.py). A second replica fires every
+#     tenant's scheduled scan a second time.
+#   - entrypoint.sh runs `alembic upgrade head` on boot. Two replicas starting
+#     together race on the migration.
+#   - the TLS PVC is ReadWriteOnce, so a rolling update cannot attach it twice.
+# There is no HA story yet. The chart does not pretend otherwise.
+
+resources:
+  app:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  caddy:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+persistence:
+  # Uploaded and CSR key material lives ONLY here (D1). Back it up, or
+  # re-provision after losing it.
+  tls:
+    size: 1Gi
+    className: ""
+  # Caddy's ACME certificates and its autosaved config, so `--resume` restores
+  # the last pushed configuration rather than falling back to bootstrap.
+  caddy:
+    size: 1Gi
+    className: ""
+
+# Passed through to the app. The chart forwards every setting it names in
+# `templates/_env.tpl`; anything absent from there is NOT reachable, which is the
+# bug class compose shipped twice (ENGINE_VERSION, the SCAN_* group).
+config:
+  corsOrigins: ""
+  scanIntervalHours: 24
+  scanThrottlingMode: Normal
+  scanConcurrency: 12
+  # /docs and /openapi.json are unauthenticated by construction and publish the
+  # whole admin surface. On only for a support session.
+  exposeApiDocs: false
+  remoteEngine:
+    leaseSeconds: 300
+    jobTtlSeconds: 3600
+    watchdogSeconds: 60
+  # Empty means "the build this server shipped with". Setting it is the
+  # fleet-wide engine rollback lever.
+  engineVersion: ""
+  engineImageRef: ""
+  engineImageDigest: ""
+
+# TLS seeding for `sidecar` mode. With a domain set and no TLS configuration in
+# the database yet, the instance is born in ACME mode and Caddy orders its own
+# certificate. Ignored in `external` mode.
+tls:
+  acmeDomain: ""
+  acmeEmail: ""
+  acmeStaging: false
+
+# CNI-dependent, so OFF by default — a policy that is accepted but not enforced
+# is worse than none, and kindnet accepts and ignores them. Turn it on where you
+# know your CNI enforces (Calico, Cilium, Antrea), and prove it with a deny-all
+# probe first.
+#
+# When on, it renders TWO policies, verified under Calico in both modes:
+#   * the application — in `external` mode only your ingress controller may
+#     reach port 8000, which is the property the app's own log warns about when
+#     it is missing ("the app port is reachable off-proxy"); in `sidecar` mode
+#     443 is open to everything, because there is no controller to name and
+#     clients arrive through a LoadBalancer, NodePort or port-forward;
+#   * the bundled database — reachable ONLY from the application. Compose binds
+#     it to 127.0.0.1 for this reason; a StatefulSet has no equivalent, so
+#     without this policy any pod in the namespace can open 5432. Measured.
+networkPolicy:
+  enabled: false
+  ingressNamespace: ingress-nginx
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+# ADDITIVE ONLY. Kubernetes refuses duplicate env names on a container, so an
+# entry here that collides with one the chart already sets does not override it
+# — the API server rejects the whole Deployment with "duplicate entries for key".
+# Measured. To change a charted value, use its own field; the settings the chart
+# deliberately does not forward are listed in
+# backend/tests/test_helm_chart_env_contract.py with a reason for each.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

@@ -1,0 +1,87 @@
+# A remote engine runs in the segment it scans — a DMZ, a branch, a cloud VPC —
+# and dials OUT to PQL. It never accepts an inbound connection from the server,
+# which is what makes it deployable where a firewall would refuse one.
+#
+# It is NOT the PQL application. Install this chart in the segment; install the
+# `pql` chart wherever PQL itself lives.
+
+image:
+  repository: ghcr.io/postquantumleap/remote-engine
+  # Empty means the chart's appVersion. Pin a digest in production.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Where this engine reports to, e.g. https://pql.example.com
+serverUrl: ""
+
+# ⚠ THE TOKEN IS A SECRET AND THE CHART WILL NOT TAKE IT AS A VALUE. It
+# authenticates this engine to your installation for as long as it is valid, and
+# a value lands in `helm get values` and in every CI log that renders the chart.
+#
+#   kubectl create secret generic pql-engine-token \
+#     --from-literal=PQL_ENGINE_TOKEN='<issued in Settings → Remote engines>'
+existingSecret: ""
+
+# Shown in PQL's console. Cosmetic, but an engine you cannot identify in a list
+# of eight is an engine nobody will dare restart.
+engineName: ""
+
+# ⚠ `notify` is the default here as it is everywhere else, and the reason is not
+# caution about the feature. `auto` means the engine EXITS when a newer build is
+# advertised, so the platform replaces it — on Kubernetes that works, and only
+# with `imagePullPolicy: Always` or a changed tag, which this chart sets for you
+# when you choose `auto`. Decide it deliberately: these containers sit in
+# segments where nobody has a shell, so an update that goes wrong is not a
+# five-minute fix.
+autoUpdate: notify        # off | notify | auto
+autoUpdateWindow: ""      # e.g. 22:00-04:00, engine-local time
+
+# The DMZ-local client-scanner relay. `0` disables it entirely, which is the
+# shape that needs no port and no firewall change.
+relay:
+  port: 0
+  # The address hosts in the segment actually dial. Must be reachable from them;
+  # it is not the Service name unless they resolve cluster DNS.
+  publicName: ""
+  service:
+    type: ClusterIP
+    annotations: {}
+
+# An outbound proxy, if the segment requires one to reach PQL.
+proxy:
+  url: ""
+  noProxy: ""
+  # Credentials belong in the same Secret as the token, as
+  # PQL_UPLINK_PROXY_USERNAME / PQL_UPLINK_PROXY_PASSWORD.
+  credentialsInSecret: false
+
+# PEM bundle for a private CA in front of PQL, mounted from a ConfigMap.
+caBundle:
+  configMap: ""
+  key: ca.pem
+
+logging:
+  level: INFO
+  # Ships engine logs to PQL, which is how anyone diagnoses an engine they
+  # cannot shell into.
+  ship: true
+  syslogUrl: ""
+
+persistence:
+  # Holds the relay's TLS material, the scanner binary cache and the
+  # update markers. Losing it re-provisions rather than breaks, but the relay
+  # then serves a new certificate.
+  size: 1Gi
+  className: ""
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+extraEnv: []

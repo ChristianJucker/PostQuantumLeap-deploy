@@ -1,0 +1,128 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Off by default because enforcement is CNI-dependent: a cluster whose CNI ignores
+NetworkPolicy silently applies nothing, and a policy that is believed but not
+enforced is worse than none. Turn it on only where you know your CNI enforces.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pql.fullname" . }}
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "pql.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if eq .Values.ingress.mode "external" }}
+    {{/*
+      `external` mode: the ONLY thing that should reach the application port is
+      your ingress controller, because a request arriving any other way carries
+      no trustworthy forwarded chain. This is the one place a namespace
+      restriction is both correct and useful.
+    */}}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- else }}
+    {{/*
+      ⚠ `sidecar` mode accepts 443 FROM ANYWHERE, and restricting it here was a
+      real bug — found the first time this policy ran under a CNI that enforces.
+      There is no ingress controller in this mode: clients reach the bundled
+      proxy directly through a LoadBalancer, a NodePort, or a port-forward, and
+      the source address depends on the platform's SNAT behaviour rather than on
+      any namespace. Naming `networkPolicy.ingressNamespace` here blocked every
+      one of those paths — including the chart's own `helm test`, which timed
+      out after seven attempts.
+
+      TLS terminates at that port and the application authenticates behind it,
+      so this is the boundary the deployment already relies on. What the policy
+      still buys in this mode is the EGRESS half below, and denying every other
+      inbound port — the admin API on 2019 and the app's own 8000 stay
+      unreachable from outside the Pod.
+    */}}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+  egress:
+    {{/* DNS. */}}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "pql.name" . }}-db
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    {{/*
+      ⚠ EGRESS TO THE INTERNET IS LEFT OPEN, and it has to be. Scanning targets
+      is what this product DOES: the app opens TLS connections to whatever hosts
+      the operator has configured, on whatever ports, and no policy here can
+      enumerate them. Constrain it at your egress firewall against your own
+      target list, not here — and note that PQL's own destination policy
+      (per-tenant RFC-1918 switch, plus netguard's absolute floor) already
+      refuses link-local and the cloud metadata address.
+    */}}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+{{- if .Values.postgresql.enabled }}
+---
+{{/*
+⚠ A SECOND POLICY, FOR THE DATABASE, and its absence was a real gap.
+
+The policy above selects the APPLICATION pods. Nothing selected the database,
+so with `networkPolicy.enabled=true` the bundled Postgres was still reachable
+from any pod in the namespace — measured with a throwaway busybox, which opened
+5432 without obstruction while the operator had every reason to believe the
+namespace was locked down.
+
+`docker-compose.yml` binds this database to 127.0.0.1 precisely so it "must not
+be reachable from other hosts on the network" (SEC audit). A StatefulSet has no
+equivalent, so the restriction has to be written here or it does not exist.
+
+Only the application may speak to it, and it may speak to nothing.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pql.fullname" . }}-db
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "pql.name" . }}-db
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- include "pql.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    {{/* DNS only. A database has no reason to originate anything else. */}}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}
+{{- end }}

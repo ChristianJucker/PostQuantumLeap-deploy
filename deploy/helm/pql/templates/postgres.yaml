@@ -1,0 +1,92 @@
+{{- if .Values.postgresql.enabled }}
+{{/*
+⚠ EVALUATION ONLY. No backup, no failover, no pooling, no monitoring. It exists
+so a fresh cluster comes up with no other prerequisite; production PQL should
+point `externalDatabase.host` at a managed Postgres someone else operates.
+
+A StatefulSet rather than a Deployment: the data directory must survive a
+rescheduled Pod, and a StatefulSet is the only workload that binds a Pod to its
+own claim.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pql.fullname" . }}-db
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: {{ include "pql.name" . }}-db
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: postgres
+      port: {{ .Values.externalDatabase.port }}
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "pql.fullname" . }}-db
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "pql.fullname" . }}-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "pql.name" . }}-db
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "pql.name" . }}-db
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{/*
+              Role and database NAMES are pinned, exactly as in compose: the
+              brand rename must land deterministically, and a stale override
+              would silently win.
+            */}}
+            - name: POSTGRES_USER
+              value: {{ .Values.externalDatabase.ownerUser | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.externalDatabase.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pql.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            {{/*
+              The image refuses to initdb into a non-empty mountpoint, and a PV
+              arrives carrying lost+found. Subdirectory, as the image documents.
+            */}}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.externalDatabase.ownerUser | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources: {{- toYaml .Values.postgresql.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.postgresql.storage.className }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.storage.size }}
+{{- end }}

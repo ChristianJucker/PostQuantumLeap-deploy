@@ -1,0 +1,38 @@
+Remote engine {{ .Chart.AppVersion }} — release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+It dials OUT to {{ .Values.serverUrl }} and never accepts a connection from it.
+
+Watch it introduce itself — the engine runs its own preflight and says exactly
+which step failed:
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "engine.name" . }} -f
+
+  preflight resolve  ok   ...
+  preflight connect  ok   ...
+  preflight tls      ok   certificate verified
+  preflight token    ok
+
+A `token FAIL PQL answered 401` means the token was revoked, expired, or is
+bound to a different installation — an engine pins to the first one it reaches.
+Issue a new one in Settings and redeploy.
+
+A `tls FAIL` behind a private CA means this chart needs the bundle:
+  --set caBundle.configMap=<configmap with your CA PEM>
+
+{{ if eq .Values.autoUpdate "auto" -}}
+⚠ autoUpdate=auto. This engine EXITS when PQL advertises a newer build, so the
+  kubelet replaces it. imagePullPolicy is set to Always for you — without it the
+  engine would restart onto the same image, find itself stale, and exit again.
+{{- else -}}
+This engine will NOT update itself (autoUpdate={{ .Values.autoUpdate }}). PQL
+shows when a newer build exists; you redeploy when you are ready.
+{{- end }}
+{{ if and .Values.relay.port (gt (int .Values.relay.port) 0) }}
+The client-scanner relay listens on {{ .Values.relay.port }} and hands hosts
+{{ .Values.relay.publicName }} to dial. That name must resolve for them — they
+are outside this cluster, so cluster DNS is not enough.
+{{- end }}
+
+There is one engine per token. A second replica would be the same engine
+claiming work twice; to add capacity, issue another token and install this chart
+again under a different release name.

@@ -1,0 +1,35 @@
+{{- if .Values.ingress.enabled }}
+{{- if eq .Values.ingress.mode "sidecar" }}
+{{- fail "ingress.enabled with ingress.mode=sidecar: the sidecar already terminates TLS, so an Ingress in front would be a second terminator. Use mode=external, or expose the Service directly (service.type=LoadBalancer)." }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pql.fullname" . }}
+  labels: {{- include "pql.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "pql.fullname" . }}
+                port:
+                  number: 8000
+{{- end }}

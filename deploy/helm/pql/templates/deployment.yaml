@@ -1,0 +1,214 @@
+{{- include "pql.validate" . -}}
+{{/*
+The app, and — in `sidecar` mode — its TLS terminator, in ONE Pod.
+
+A literal translation of docker-compose.yml (one Deployment per service) breaks
+three things at once, and co-locating them fixes all three:
+
+ 1. `TRUSTED_PROXY_CIDRS=172.28.0.10/32` in compose is a STATIC proxy address on
+    a declared subnet. Pod IPs are dynamic, and trusting the pod CIDR instead
+    re-opens exactly the forgeable-X-Forwarded-For hole that the fixed subnet was
+    introduced to close. As a sidecar the proxy is 127.0.0.1 and the trust list
+    is a single loopback address that nothing else can occupy.
+ 2. The `tls_certs` volume is rw in app and ro in caddy — the app WRITES key
+    material that Caddy loads (app/routers/server_tls.py). Two Pods sharing a
+    volume needs ReadWriteMany, which no default StorageClass provides. One Pod
+    makes ReadWriteOnce correct.
+ 3. The app PUSHES Caddy's config over the admin API. Same Pod means localhost,
+    and the admin listener never leaves the Pod's network namespace.
+
+The cost is that the proxy cannot be scaled or updated independently. The app is
+pinned to one replica anyway, so today that costs nothing.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pql.fullname" . }}
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  {{/*
+    ONE replica and Recreate, not a knob. Three independent reasons, any one of
+    which is sufficient: APScheduler runs in-process and a second replica fires
+    every tenant's scheduled scan twice; entrypoint.sh runs `alembic upgrade
+    head` on boot and two replicas race it; the PVCs are ReadWriteOnce so a
+    rolling update's new Pod cannot attach while the old one holds them.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{- include "pql.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "pql.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{/* Roll the Pod when the bootstrap config changes. */}}
+        {{- if eq .Values.ingress.mode "sidecar" }}
+        checksum/caddy-config: {{ include (print $.Template.BasePath "/configmap-caddy.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      initContainers:
+        {{/*
+          Compose gets this from `depends_on: condition: service_healthy`.
+          Kubernetes has no equivalent, and without it the app crash-loops
+          through migrations until Postgres happens to be up — which works, but
+          reads like a database fault in the logs.
+        */}}
+        - name: wait-for-db
+          image: {{ .Values.postgresql.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "pql.dbHost" . }} -p {{ .Values.externalDatabase.port }} -U {{ .Values.externalDatabase.ownerUser }}; do
+                echo "waiting for {{ include "pql.dbHost" . }}"; sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+      containers:
+        - name: app
+          image: {{ include "pql.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env: {{- include "pql.env" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: tls
+              mountPath: /var/lib/pql/tls
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{/*
+            `tcpSocket`, and it is exact rather than lazy: entrypoint.sh runs
+            `alembic upgrade head` and only THEN `exec uvicorn`, so the port does
+            not open until migrations have finished. The socket is therefore a
+            precise startup gate, and it needs no route in the application to
+            maintain, classify and keep unauthenticated.
+
+            There is deliberately NO readinessProbe. Without one a container is
+            Ready once started, which the startupProbe above already gates. A
+            readiness check against the database sounds better than it is here:
+            it controls Service membership, and with ONE replica there is nowhere
+            to shift traffic to, so failing it takes the Service to zero
+            endpoints and the operator gets a bare 503 from the proxy instead of
+            the application's own error — harder to diagnose, not easier.
+          */}}
+          startupProbe:
+            tcpSocket: {port: 8000}
+            periodSeconds: 5
+            failureThreshold: 60   # 5 minutes: first boot runs the full migration history
+          livenessProbe:
+            tcpSocket: {port: 8000}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources: {{- toYaml .Values.resources.app | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+        {{- if eq .Values.ingress.mode "sidecar" }}
+        - name: caddy
+          image: {{ .Values.caddyImage | default "docker.io/library/caddy:2.11.4" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json", "--resume"]
+          ports:
+            - name: https
+              containerPort: 443
+          volumeMounts:
+            {{/*
+              ro here, rw in app — the same split compose uses. Uploaded and CSR
+              key material lives ONLY on this volume: back it up, or
+              re-provision after losing it.
+            */}}
+            - name: tls
+              mountPath: /var/lib/pql/tls
+              readOnly: true
+            {{/*
+              --resume replays the last pushed config from here, so a restarted
+              proxy does not fall back to bootstrap and drop the operator's TLS
+              configuration until the app happens to push again.
+            */}}
+            - name: caddy-data
+              mountPath: /data
+              subPath: data
+            - name: caddy-data
+              mountPath: /config
+              subPath: config
+            - name: caddy-bootstrap
+              mountPath: /etc/caddy
+              readOnly: true
+          resources: {{- toYaml .Values.resources.caddy | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # Caddy binds 443. Without this the container cannot listen as a
+              # non-root user on a privileged port.
+              add: ["NET_BIND_SERVICE"]
+        {{- end }}
+      volumes:
+        - name: tls
+          persistentVolumeClaim:
+            claimName: {{ include "pql.fullname" . }}-tls
+        {{- if eq .Values.ingress.mode "sidecar" }}
+        - name: caddy-data
+          persistentVolumeClaim:
+            claimName: {{ include "pql.fullname" . }}-caddy
+        - name: caddy-bootstrap
+          configMap:
+            name: {{ include "pql.fullname" . }}-caddy
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "pql.fullname" . }}-tls
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.persistence.tls.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.tls.size }}
+{{- if eq .Values.ingress.mode "sidecar" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "pql.fullname" . }}-caddy
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.persistence.caddy.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.caddy.size }}
+{{- end }}

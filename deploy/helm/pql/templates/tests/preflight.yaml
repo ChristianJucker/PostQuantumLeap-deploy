@@ -1,0 +1,197 @@
+{{/*
+`helm test` — the reason this chart can hand you the ingress and still be safe.
+
+`ingress.trustedProxyCIDRs` is a security control that fails SILENTLY in both
+directions: too narrow collapses every client behind the proxy into one
+rate-limit bucket, too broad lets anything that can reach the app port choose
+which bucket it lands in. Neither shows up as an error, in a log you would think
+to read, or in `kubectl get`.
+
+So the chart does not ask you to get it right from a values file. It asks the
+running installation what it actually believed, through the same path a real
+user takes, and fails the test if the answer is wrong.
+
+  attributable: true  → the chain was verified; PQL is rate-limiting per client.
+  attributable: false → PQL refused the chain and fell back to the peer. The
+                        limiter still works, but it now shares one bucket across
+                        everything behind your proxy.
+
+Run it after install and after any change to your ingress:
+  helm test <release>
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "pql.fullname" . }}-preflight
+  {{/*
+    ⚠ NOT `pql.labels`. That helper sets app.kubernetes.io/name and
+    app.kubernetes.io/instance, which are EXACTLY the Service's selector — so a
+    test Pod wearing them JOINS the Service it is trying to test. Measured: the
+    EndpointSlice picked up the preflight Pod, kube-proxy load-balanced roughly
+    half the connections to it, and the test failed with "connection refused"
+    from port 443 of a Pod that runs no proxy. The app was fine the whole time.
+  */}}
+  labels:
+    app.kubernetes.io/name: {{ include "pql.name" . }}-preflight
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+  annotations:
+    "helm.sh/hook": test
+    {{/*
+      `before-hook-creation` ONLY. Adding `hook-succeeded` deletes the Pod the
+      instant it passes, and `helm test --logs` then races it and prints
+      "pods ... not found" — so the one command that tells an operator WHICH
+      address PQL attributed loses its output on the successful path, which is
+      the path they most want to read. The Pod is replaced on the next run.
+    */}}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.image.pullSecrets }}
+  imagePullSecrets: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: preflight
+      {{/*
+        The app's own image: it is already present on the node, and it carries a
+        Python with everything needed. Adding a curl image would be one more
+        thing to mirror in an air-gapped registry for no gain.
+      */}}
+      image: {{ include "pql.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["python3", "-c"]
+      args:
+        - |
+          import json, ssl, sys, time, urllib.error, urllib.request
+
+          MODE = {{ .Values.ingress.mode | quote }}
+          DEPLOY = {{ include "pql.fullname" . | quote }}
+          HOPS = {{ .Values.ingress.trustedProxyHops }}
+          # The request MUST traverse your ingress controller, because that
+          # controller is the thing whose address we are verifying. Hitting the
+          # app Service directly would bypass it and prove nothing.
+          #
+          # `ingress.preflightAddress` exists because dialling the public host
+          # name from inside the cluster only works where DNS hairpins back to
+          # the ingress — which it often does not: a split-horizon zone, a
+          # private name, or an external-DNS record the cluster's resolver has
+          # never heard of all end in "Name or service not known". Measured on
+          # kind, where the test failed for exactly that reason and for no other.
+          #
+          # When set, we dial the controller IN-CLUSTER and carry the public name
+          # in the Host header, so nginx routes on the same rule a real request
+          # would match — the ingress is still in the path, which is the whole
+          # point of the check.
+          HOST = {{ .Values.ingress.host | default "" | quote }}
+          ADDR = {{ .Values.ingress.preflightAddress | default "" | quote }}
+          {{- if eq .Values.ingress.mode "external" }}
+          URL = f"https://{ADDR or HOST}/api/health/forwarded"
+          HEADERS = {"Host": HOST} if ADDR else {}
+          {{- else }}
+          URL = {{ printf "https://%s/api/health/forwarded" (include "pql.fullname" .) | quote }}
+          HEADERS = {}
+          {{- end }}
+
+          # Certificate verification is off ON PURPOSE and it weakens nothing
+          # here: in sidecar mode the certificate is issued by Caddy's internal
+          # CA, which no pod trusts; and this request asserts a property of the
+          # HTTP layer, not of the certificate. The instance's own TLS is
+          # verified separately, by the operator, against a real name.
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          # ── retry, because "not yet" is not "misconfigured" ────────────────
+          # An ingress needs a moment to pick up new endpoints after a rollout,
+          # and `helm test` runs immediately after `helm upgrade`. Measured: a
+          # CORRECT configuration failed on nginx's 503, purely because the app
+          # Pod had been replaced seconds earlier — and it failed as a raw
+          # traceback, which reads like a chart bug rather than a race. A
+          # preflight that cries wolf on a rollout is one people learn to
+          # ignore, and that costs more than the check is worth.
+          DEADLINE = time.monotonic() + 120
+          attempt, body, last = 0, None, None
+          while time.monotonic() < DEADLINE:
+              attempt += 1
+              try:
+                  req = urllib.request.Request(URL, headers=HEADERS)
+                  with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+                      body = json.load(r)
+                  break
+              except urllib.error.HTTPError as e:
+                  last = e
+                  if e.code == 404:
+                      print("FAIL: /api/health/forwarded returned 404.\n"
+                            "      This installation predates the diagnostic endpoint, so the\n"
+                            "      preflight cannot verify your proxy trust configuration.\n"
+                            "      Upgrade the app image and re-run.")
+                      sys.exit(1)
+                  if e.code not in (502, 503, 504):
+                      # A shaped message, not a traceback. This IS the
+                      # diagnostic, so it has to read like one even when the
+                      # failure is not the one it was written for.
+                      print(f"FAIL: {URL} answered HTTP {e.code} ({e.reason}).\n"
+                            "      That is not a proxy-trust problem — PQL never got to answer.\n"
+                            "      Check the app and the ingress:\n"
+                            f"        kubectl logs deploy/{DEPLOY} -c app --tail=50")
+                      sys.exit(1)
+              except Exception as e:  # DNS, refused, TLS, timeout
+                  last = e
+              time.sleep(3)
+
+          if body is None:
+              print(f"FAIL: could not reach {URL} after {attempt} attempts over 120s.")
+              print(f"      last error: {last!r}\n")
+              if MODE == "external":
+                  print("      The preflight has to reach PQL THROUGH your ingress, and this\n"
+                        "      pod could not.\n")
+                  if not ADDR:
+                      print("      Most often this is DNS: the public host name does not resolve\n"
+                            "      inside the cluster. Point the preflight at the controller\n"
+                            "      directly and it will carry the host name in the Host header:\n"
+                            "        --set ingress.preflightAddress=ingress-nginx-controller.ingress-nginx.svc.cluster.local\n")
+                  else:
+                      print(f"      ingress.preflightAddress is {ADDR!r}. Check that it names your\n"
+                            "      ingress controller's Service and that this namespace may reach\n"
+                            "      it — a NetworkPolicy denying egress would also land here.\n")
+                  print("      Either way you can run the same check from outside the cluster:\n"
+                        f"        curl -sk https://{HOST}/api/health/forwarded")
+              sys.exit(1)
+
+          print(f"preflight: mode={MODE} url={URL} attempts={attempt}")
+          print("response:", json.dumps(body))
+
+          if not body.get("attributable"):
+              print(
+                  "\nFAIL: PQL did not believe the X-Forwarded-For chain on this request.\n"
+                  "\n"
+                  "Every client arriving through your ingress is now sharing ONE\n"
+                  "rate-limit and lockout bucket, so login throttling can no longer tell\n"
+                  "two callers apart. It fails closed — nobody can choose someone else's\n"
+                  "bucket — but the protection is much weaker than it looks.\n"
+                  "\n"
+                  f"  entries seen in X-Forwarded-For: {body.get('forwarded_entries')}\n"
+                  f"  ingress.trustedProxyHops:        {HOPS}\n"
+                  "\n"
+                  "Two causes, in order of likelihood:\n"
+                  "\n"
+                  "1. ingress.trustedProxyCIDRs does not contain the address your\n"
+                  "   controller actually speaks from. The app logs the address it saw —\n"
+                  "   look for 'X-Forwarded-For ignored for a connection from ...':\n"
+                  f"     kubectl logs deploy/{DEPLOY} -c app | grep -i forwarded\n"
+                  "\n"
+                  "2. ingress.trustedProxyHops does not match your real chain. It counts\n"
+                  "   proxies from the RIGHT: one ingress controller is 1, a CDN in front\n"
+                  "   of it is 2. Compare against the entry count above.\n"
+              )
+              sys.exit(1)
+
+          print(
+              f"\nOK: chain verified. PQL attributed this request to {body['client_ip']},\n"
+              "    which means per-client rate limiting and lockout are working as\n"
+              "    intended behind your proxy."
+          )
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}

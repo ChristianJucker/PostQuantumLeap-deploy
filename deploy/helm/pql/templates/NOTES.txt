@@ -1,0 +1,67 @@
+Post Quantum Leap {{ .Chart.AppVersion }} — release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+The first boot runs the full migration history before uvicorn binds, so give it
+a few minutes on a fresh database:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "pql.fullname" . }}
+
+{{ if eq .Values.ingress.mode "sidecar" -}}
+MODE: sidecar. The bundled Caddy terminates TLS inside the Pod, and
+TRUSTED_PROXY_CIDRS is 127.0.0.1/32 — correct by construction.
+{{- if eq .Values.service.type "ClusterIP" }}
+
+  Reach it with a port-forward:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "pql.fullname" . }} 8443:443
+    open https://localhost:8443
+{{- else }}
+
+  Service type is {{ .Values.service.type }}; find the address with:
+    kubectl -n {{ .Release.Namespace }} get svc {{ include "pql.fullname" . }}
+{{- end }}
+{{- else -}}
+MODE: external. Your ingress controller terminates TLS and PQL trusts a
+forwarded client address only from:
+
+    {{ include "pql.trustedProxyCIDRs" . }}   (hops: {{ .Values.ingress.trustedProxyHops }})
+
+⚠ VERIFY THAT, DO NOT ASSUME IT. It is a security control that fails silently
+in both directions, and the chart cannot check it from a values file:
+
+    helm test -n {{ .Release.Namespace }} {{ .Release.Name }}
+{{- end }}
+
+Sign in as the address in your Secret's INITIAL_ADMIN_USERNAME. The first login
+forces a password change.
+{{ if .Values.eval.generateSecrets }}
+  Read the generated evaluation password with:
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "pql.secretName" . }} \
+      -o jsonpath='{.data.INITIAL_ADMIN_PASSWORD}' | base64 -d; echo
+{{- end }}
+
+{{ if .Values.eval.generateSecrets }}
+────────────────────────────────────────────────────────────────────────────────
+⚠ THIS RELEASE GENERATED ITS OWN SECRETS. NOT FOR PRODUCTION.
+
+They survive `helm upgrade` only because `lookup` can read them from the live
+cluster. `lookup` returns EMPTY under `helm template`, which is how ArgoCD, Flux
+and every `helm template | kubectl apply` pipeline render a chart — so syncing
+this release through any of them will mint a new SETTINGS_ENC_KEY and make every
+stored SSO client secret permanently undecryptable.
+
+Before this instance holds anything real, move to a Secret you control:
+  docs/deploy/secret-injection.md
+────────────────────────────────────────────────────────────────────────────────
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+⚠ THE BUNDLED POSTGRES IS FOR EVALUATION. No backup, no failover, no pooling.
+  Point externalDatabase.host at a managed database before this matters.
+{{- end }}
+{{- if .Values.config.exposeApiDocs }}
+⚠ EXPOSE_API_DOCS IS ON. /docs and /openapi.json are unauthenticated by
+  construction and publish the whole admin surface. Turn it off after the
+  support session that needed it.
+{{- end }}
+
+There is no HA: one replica, Recreate, ReadWriteOnce volumes. The scheduler runs
+in-process and migrations run at boot, so a second replica would double every
+scheduled scan and race the migration. Plan maintenance windows accordingly.

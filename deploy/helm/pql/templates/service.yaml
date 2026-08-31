@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pql.fullname" . }}
+  labels: {{- include "pql.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {{- include "pql.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- if eq .Values.ingress.mode "sidecar" }}
+    - name: https
+      port: 443
+      targetPort: 443
+    {{- else }}
+    {{/*
+      `external` mode: your ingress controller terminates TLS and forwards
+      cleartext to the app. There is no sidecar and no 443 here.
+    */}}
+    - name: http
+      port: 8000
+      targetPort: 8000
+    {{- end }}
+    {{- if .Values.service.exposeAppPort }}
+    {{/*
+      Publishes the app's own port ALONGSIDE the proxy, which makes it reachable
+      off-proxy — the app logs exactly that, and it is right. For an e2e harness
+      only; `pql.validate` refuses this in `external` mode.
+    */}}
+    - name: http-direct
+      port: 8000
+      targetPort: 8000
+    {{- end }}

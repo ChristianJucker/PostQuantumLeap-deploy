@@ -1,0 +1,182 @@
+{{- include "engine.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "engine.fullname" . }}
+  labels: {{- include "engine.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  {{/*
+    ONE replica, and not a knob. An engine is an IDENTITY, not a worker pool:
+    the token it holds names one engine in PQL's console, and a second Pod
+    sharing that token is the same engine claiming work twice, reporting two
+    heartbeats and two versions. If you need more capacity, issue another token
+    and install this chart again with its own release name.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{- include "engine.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "engine.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: engine
+          image: {{ include "engine.image" . }}
+          {{/*
+            ⚠ `auto` REQUIRES `Always`. The engine applies an update by exiting
+            so the platform replaces it; the kubelet restarts the container from
+            the image it already has unless told to re-pull, so with
+            IfNotPresent the engine would exit, come back on the same build,
+            find itself stale, and exit again. INSTALLATION.md states this as an
+            operator's responsibility — the chart just does it.
+          */}}
+          imagePullPolicy: {{ eq .Values.autoUpdate "auto" | ternary "Always" .Values.image.pullPolicy }}
+          env:
+            - name: PQL_SERVER_URL
+              value: {{ .Values.serverUrl | quote }}
+            - name: PQL_ENGINE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: PQL_ENGINE_TOKEN
+            {{/*
+              EXPLICIT beats clever. config.py autodetects `kubernetes` from
+              KUBERNETES_SERVICE_HOST, which is real but circumstantial — the
+              variable is injected by the kubelet and a sidecar-injecting mesh
+              or a bare `kubectl run` can make it lie. The platform decides what
+              an update DOES, so it is stated rather than inferred.
+            */}}
+            - name: PQL_ENGINE_PLATFORM
+              value: kubernetes
+            - name: PQL_AUTO_UPDATE
+              value: {{ .Values.autoUpdate | quote }}
+            {{- with .Values.autoUpdateWindow }}
+            - name: PQL_AUTO_UPDATE_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.engineName }}
+            - name: PQL_ENGINE_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            - name: PQL_STATE_DIR
+              value: /var/lib/pql-remote-engine
+            - name: PQL_LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            - name: PQL_LOG_SHIP
+              value: {{ .Values.logging.ship | quote }}
+            {{- with .Values.logging.syslogUrl }}
+            - name: PQL_SYSLOG_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if and .Values.relay.port (gt (int .Values.relay.port) 0) }}
+            - name: PQL_RELAY_PORT
+              value: {{ .Values.relay.port | quote }}
+            - name: PQL_RELAY_PUBLIC_NAME
+              value: {{ .Values.relay.publicName | quote }}
+            {{- end }}
+            {{- with .Values.proxy.url }}
+            - name: PQL_UPLINK_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.proxy.noProxy }}
+            - name: PQL_UPLINK_NO_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.proxy.credentialsInSecret }}
+            - name: PQL_UPLINK_PROXY_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ .Values.existingSecret }}, key: PQL_UPLINK_PROXY_USERNAME}}
+            - name: PQL_UPLINK_PROXY_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.existingSecret }}, key: PQL_UPLINK_PROXY_PASSWORD}}
+            {{- end }}
+            {{- if .Values.caBundle.configMap }}
+            - name: PQL_CA_BUNDLE
+              value: /etc/pql/ca/{{ .Values.caBundle.key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if and .Values.relay.port (gt (int .Values.relay.port) 0) }}
+          ports:
+            - name: relay
+              containerPort: {{ .Values.relay.port }}
+          {{- end }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/pql-remote-engine
+            {{- if .Values.caBundle.configMap }}
+            - name: ca
+              mountPath: /etc/pql/ca
+              readOnly: true
+            {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "engine.fullname" . }}
+        {{- if .Values.caBundle.configMap }}
+        - name: ca
+          configMap:
+            name: {{ .Values.caBundle.configMap }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "engine.fullname" . }}
+  labels: {{- include "engine.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.persistence.className }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- if and .Values.relay.port (gt (int .Values.relay.port) 0) }}
+---
+{{/*
+  The relay listener. Hosts in this segment dial `relay.publicName`, which has
+  to resolve to whatever this Service exposes — a LoadBalancer address, a
+  NodePort on a reachable node, or a name your own DNS points at it. Cluster
+  DNS is not enough: the hosts doing the dialling are outside the cluster.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "engine.fullname" . }}-relay
+  labels: {{- include "engine.labels" . | nindent 4 }}
+  {{- with .Values.relay.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.relay.service.type }}
+  selector: {{- include "engine.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: relay
+      port: {{ .Values.relay.port }}
+      targetPort: {{ .Values.relay.port }}
+{{- end }}

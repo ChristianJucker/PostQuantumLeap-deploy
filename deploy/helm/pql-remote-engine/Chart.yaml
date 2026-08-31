@@ -1,0 +1,9 @@
+apiVersion: v2
+name: pql-remote-engine
+description: A Post Quantum Leap remote engine — scans a network segment PQL cannot reach
+type: application
+version: 0.1.0
+appVersion: "1.1.0"
+home: https://postquantumleap.com
+maintainers:
+  - name: Post Quantum Leap

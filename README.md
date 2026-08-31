@@ -78,9 +78,21 @@ What you now have:
 | `deploy/caddy/bootstrap.json` | the proxy's starting configuration, mounted read-only |
 | `deploy/engine-images/` | empty, and correct that way — see [Remote engines](#12-remote-engines) |
 | `deploy/install-windows.ps1` | Windows only — does sections 1 to 3 for you, see below |
+| `deploy/KUBERNETES.md` | Kubernetes only — a Helm chart instead of Compose, see below |
+| `deploy/helm/` | the charts that guide installs |
 
-Keep the directory layout. `docker-compose.yml` mounts the last two by relative path,
-so moving them breaks the start.
+Keep the directory layout. `docker-compose.yml` mounts `deploy/caddy/bootstrap.json`
+and `deploy/engine-images/` by relative path, so moving them breaks the start.
+
+### On Kubernetes
+
+Compose is the simpler path and the one this guide follows. If you already run a
+cluster, [`deploy/KUBERNETES.md`](deploy/KUBERNETES.md) covers the Helm chart
+instead — including a `helm test` that proves your own ingress is wired correctly,
+which is the one thing a Kubernetes install can get wrong silently.
+
+It offers no capability Compose lacks, and Post Quantum Leap runs as a single
+replica either way. If you are choosing between them, choose Compose.
 
 ### On Windows
 

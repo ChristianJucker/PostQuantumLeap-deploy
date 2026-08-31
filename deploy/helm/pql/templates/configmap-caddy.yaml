@@ -1,0 +1,62 @@
+{{- if eq .Values.ingress.mode "sidecar" }}
+{{/*
+Caddy's BOOTSTRAP configuration — what it serves for the few seconds before the
+app pushes the real one, and what `--resume` falls back to if no config has ever
+been autosaved.
+
+⚠ THIS IS NOT WHERE THE UPSTREAM IS DECIDED. The app renders and pushes its own
+config over the admin API at boot; whatever is written here is replaced within
+seconds. The upstream that survives is `PROXY_UPSTREAM` in _env.tpl. Editing this
+file to fix a 502 is the trap — it works until the first restart.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pql.fullname" . }}-caddy
+  labels: {{- include "pql.labels" . | nindent 4 }}
+data:
+  bootstrap.json: |
+    {
+      "admin": {
+        "listen": ":2019",
+        "origins": ["localhost:2019", "127.0.0.1:2019"]
+      },
+      "apps": {
+        "http": {
+          "servers": {
+            "pql": {
+              "listen": [":443"],
+              "routes": [{
+                "handle": [{
+                  "handler": "reverse_proxy",
+                  "upstreams": [{"dial": "127.0.0.1:8000"}],
+                  "headers": {"request": {"set": {"X-Forwarded-Proto": ["https"]}}}
+                }]
+              }]
+            }
+          }
+        },
+        "tls": {
+          "automation": {
+            "policies": [
+              {
+                "subjects": ["localhost", "127.0.0.1", "::1"],
+                "issuers": [{"module": "internal", "lifetime": "720h"}]
+              },
+              {
+                "issuers": [{"module": "internal", "lifetime": "720h"}],
+                "on_demand": true
+              }
+            ],
+            "on_demand": {
+              "permission": {
+                "module": "http",
+                "endpoint": "http://127.0.0.1:8000/api/tls/on-demand"
+              }
+            }
+          },
+          "certificates": {"automate": ["localhost", "127.0.0.1", "::1"]}
+        }
+      }
+    }
+{{- end }}

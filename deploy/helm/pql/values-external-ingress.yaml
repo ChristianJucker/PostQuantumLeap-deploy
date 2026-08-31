@@ -1,0 +1,64 @@
+# Worked example: PQL behind your own ingress-nginx, TLS terminated at the edge
+# by cert-manager. This is the shape most installations take.
+#
+#   helm install pql deploy/helm/pql \
+#     -n pql --create-namespace \
+#     -f deploy/helm/pql/values-external-ingress.yaml \
+#     --set ingress.host=pql.example.com \
+#     --set ingress.trustedProxyCIDRs={10.42.1.0/24} \
+#     --set externalDatabase.host=pg.example.internal \
+#     --set existingSecret=pql-secrets
+#
+#   helm test -n pql pql     # ← verifies the trust configuration for real
+
+ingress:
+  mode: external
+  enabled: true
+  className: nginx
+  # host: pql.example.com          ← yours
+  tls:
+    enabled: true
+    secretName: pql-tls           # cert-manager fills this
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # The app parses X-Forwarded-For itself and counts hops from the right, so
+    # the controller must APPEND rather than replace. ingress-nginx appends by
+    # default; this pins it against a cluster-wide ConfigMap that turned it off.
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+
+  # ⚠ REPLACE. Your controller's own pod addresses — not the node CIDR, not the
+  # service CIDR, and not the /16 either of those sits inside. Find them with:
+  #   kubectl -n ingress-nginx get pods -o jsonpath='{.items[*].status.podIP}'
+  # trustedProxyCIDRs:
+  #   - 10.42.1.0/24
+
+  # One controller between the client and PQL. A CDN in front makes this 2.
+  trustedProxyHops: 1
+
+service:
+  type: ClusterIP
+  # Must stay false in this mode — the chart refuses otherwise. Publishing 8000
+  # alongside the ingress lets callers bypass the proxy, and a request that did
+  # not come through the proxy carries no trustworthy forwarded chain.
+  exposeAppPort: false
+
+# Production: a managed Postgres someone else backs up.
+postgresql:
+  enabled: false
+externalDatabase:
+  # host: pg.example.internal      ← yours
+  sslMode: require
+
+# Create this yourself, or sync it from a vault with external-secrets. The chart
+# will not generate it: see the note at the top of values.yaml.
+existingSecret: pql-secrets
+
+# VERIFIED under Calico on 2026-08-31, in both modes, and it found two real
+# bugs before it was believed — see deploy/helm/pql/README.md.
+#
+# Still gated on your CNI actually implementing NetworkPolicy: kindnet, for one,
+# does not, and there a policy is accepted, displayed by `kubectl get`, and
+# enforces nothing. Verify with a deny-all probe before relying on it.
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx
