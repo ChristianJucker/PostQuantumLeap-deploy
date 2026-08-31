@@ -2,8 +2,11 @@ apiVersion: v2
 name: pql-remote-engine
 description: A Post Quantum Leap remote engine — scans a network segment PQL cannot reach
 type: application
-version: 0.1.0
-appVersion: "1.1.0"
+version: 0.2.0
+# Tracks ENGINE_VERSION in backend/app/version.py — the build this server
+# advertises. A chart that deploys an older one makes every engine report
+# itself stale the moment it connects. Pinned by a test.
+appVersion: "1.3.0"
 home: https://postquantumleap.com
 maintainers:
   - name: Post Quantum Leap

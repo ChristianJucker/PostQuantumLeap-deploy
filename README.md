@@ -182,7 +182,7 @@ right for a trial and wrong for a maintained installation: an unattended pull th
 you across a release boundary at a moment you did not choose.
 
 ```bash
-PQL_IMAGE=ghcr.io/christianjucker/pql-app:3.1.0
+PQL_IMAGE=ghcr.io/christianjucker/pql-app:3.2.0
 ```
 
 The versions actually published are listed at
@@ -531,7 +531,7 @@ Mirror internally and point the whole deployment at your registry — no file ed
 variables:
 
 ```bash
-PQL_IMAGE=registry.example.com/pql-app:3.1.0
+PQL_IMAGE=registry.example.com/pql-app:3.2.0
 PQL_POSTGRES_IMAGE=registry.example.com/postgres:16
 PQL_CADDY_IMAGE=registry.example.com/caddy:2.11.4
 ```
@@ -651,7 +651,7 @@ image pulled before the multi-arch release survives every teardown and gets reus
 
 ```bash
 docker compose down
-docker rmi -f ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.1.0
+docker rmi -f ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.2.0
 docker compose pull
 docker compose up -d
 ```
@@ -676,14 +676,14 @@ docker compose up -d
 If it survives that, the tag is still mapped to the old digest. Drop it and pull again:
 
 ```bash
-docker rmi ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.1.0
+docker rmi ghcr.io/christianjucker/pql-app:latest ghcr.io/christianjucker/pql-app:3.2.0
 docker compose pull
 ```
 
 Confirm what the registry actually offers — this needs no credentials and no local state:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.1.0
+docker buildx imagetools inspect ghcr.io/christianjucker/pql-app:3.2.0
 ```
 
 That must list `linux/amd64` **and** `linux/arm64`. If it does and you still get the
